@@ -134,6 +134,8 @@ PUBLISH_LOCK="$STATE/.startup-network.lock"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-company-pause-lib.sh
+. "$SCRIPT_DIR/fm-company-pause-lib.sh"
 
 usage() {
   sed -n '2,/^set -u$/p' "$SCRIPT_DIR/fm-startup-network.sh" | sed 's/^# \{0,1\}//; $d'
@@ -420,7 +422,7 @@ EOF
 }
 
 cmd_run() {  # <locked> <lock-pid> <generation>
-  local locked=$1 lock_pid=$2 generation=$3 phases started budget out rc sweep_locked=0 downgraded=0 internal=0 lease_held=0 timings stage_started
+  local locked=$1 lock_pid=$2 generation=$3 phases started budget out rc sweep_locked=0 downgraded=0 internal=0 lease_held=0 timings stage_started company_pause= company_rc=0
   mkdir -p "$STATE" 2>/dev/null || return 1
   started=$(now)
   budget=$(stage_budget)
@@ -445,6 +447,28 @@ cmd_run() {  # <locked> <lock-pid> <generation>
     else
       downgraded=1
     fi
+  fi
+
+  # A paused company admits no new business work, so the locked mutating branch
+  # must not run: fall through to the existing detect-only branch, which runs the
+  # ordinary bootstrap diagnostics and skips the inactive-outcome scan. This
+  # applies to a direct `run --locked 1` exactly as much as to the detached
+  # worker that `start` launches. A malformed company configuration takes the
+  # same safe branch and reports itself in the published result.
+  if [ "$sweep_locked" -eq 1 ]; then
+    company_rc=0
+    fm_company_admission || company_rc=$?
+    case "$company_rc" in
+      3)
+        sweep_locked=0
+        phases=probe
+        ;;
+      1)
+        sweep_locked=0
+        phases=probe
+        company_pause=error
+        ;;
+    esac
   fi
 
   if [ "$internal" -eq 0 ]; then
@@ -504,6 +528,9 @@ EOF
       "$SCRIPT_DIR/fm-bootstrap.sh" >"$out" 2>&1 || rc=$?
   fi
   [ "$lease_held" -eq 0 ] || fm_lock_release "$STATE/.lock.acquire"
+  if [ "$company_pause" = error ]; then
+    printf 'COMPANY_PAUSE: %s\n' "$FM_COMPANY_ERROR" >> "$out"
+  fi
   # The bounded run as a whole, so the per-phase records can be read against the
   # total even when the bound cut some of them off.
   fm_timing_record stage network-checks "$stage_started" "$phases"

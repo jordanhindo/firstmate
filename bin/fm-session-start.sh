@@ -341,6 +341,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-company-pause-lib.sh
+. "$SCRIPT_DIR/fm-company-pause-lib.sh"
 
 # One tasks-axi compatibility verdict per session start. The probe costs three
 # tasks-axi subprocesses and this digest needs the same answer twice - here for
@@ -645,6 +647,48 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '%s\n' "$BAR"
   }
 fi
+# A paused company holds a verified lock but admits no new business work. Route it
+# through the same detect-only path a read-only session uses, while keeping chat,
+# control, inspection, and queued records available. It must never be reported as
+# a lock failure, because this session DID acquire the lock. A partial or bad
+# company configuration blocks mutating startup the same way and reports itself.
+COMPANY_PAUSED=0
+if [ "$READ_ONLY" -eq 0 ]; then
+  company_rc=0
+  fm_company_admission || company_rc=$?
+  case "$company_rc" in
+    3)
+      COMPANY_PAUSED=1
+      READ_ONLY=1
+      BAR='●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+      {
+        printf '%s\n' "$BAR"
+        printf '●  COMPANY PAUSED - NEW WORK IS NOT ADMITTED\n'
+        printf '●  The company is intentionally paused. This session still holds the fleet\n'
+        printf '●  lock, so this is NOT a lock failure. Skipping every mutating step: stale\n'
+        printf '●  Herdr child cleanup, secondmate convergence, secondmate liveness, pending\n'
+        printf '●  remote handoff retry, X-mode artifacts, fleet sync, and wake-queue drain.\n'
+        printf '●  Chat, control, inspection, and every queued record stay available and are\n'
+        printf '●  never erased. Resume through the company control CLI to admit work again.\n'
+        printf '%s\n' "$BAR"
+      }
+      ;;
+    1)
+      COMPANY_PAUSED=1
+      READ_ONLY=1
+      BAR='●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+      {
+        printf '%s\n' "$BAR"
+        printf '●  COMPANY CONFIGURATION ERROR - MUTATING STARTUP STOPPED\n'
+        printf '●  %s\n' "$FM_COMPANY_ERROR"
+        printf '●  Treated as blocked rather than non-company. Skipping mutating steps until\n'
+        printf '●  the company configuration is repaired. Chat, control, inspection, and\n'
+        printf '●  queued records remain available and are never erased.\n'
+        printf '%s\n' "$BAR"
+      }
+      ;;
+  esac
+fi
 REBUILDING_SESSION_PID=$(fm_harness_ancestry_pid 2>/dev/null || true)
 print_agents_refresh_if_required "$REBUILDING_SESSION_PID"
 
@@ -718,7 +762,11 @@ subsection "WAKE QUEUE"
 if [ "$READ_ONLY" -eq 1 ]; then
   QLEN=0
   [ -s "$STATE/.wake-queue" ] && QLEN=$(grep -c . "$STATE/.wake-queue" 2>/dev/null || printf '0')
-  printf 'skipped (read-only session) - %s record(s) remain queued because this session lacks verified fleet-lock ownership.\n' "$QLEN"
+  if [ "$COMPANY_PAUSED" -eq 1 ]; then
+    printf 'preserved (company paused) - %s record(s) stay queued and are never erased while work is paused.\n' "$QLEN"
+  else
+    printf 'skipped (read-only session) - %s record(s) remain queued because this session lacks verified fleet-lock ownership.\n' "$QLEN"
+  fi
   GUARD_OUT=$(FM_GUARD_READ_ONLY=1 "$SCRIPT_DIR/fm-guard.sh" 2>&1)
   [ -n "$GUARD_OUT" ] && printf '%s\n' "$GUARD_OUT"
 else
@@ -888,10 +936,18 @@ fi
 stage network-checks
 section "NETWORK CHECKS"
 if [ "$READ_ONLY" -eq 1 ]; then
-  printf 'skipped (read-only session) - GitHub authentication, project clone refresh,\n'
-  printf 'secondmate liveness and convergence, and pending handoff delivery were not run.\n'
-  printf 'They need the fleet lock, and this session must not spawn, steer, or merge, so it\n'
-  printf 'has no action they would gate. The session holding the lock runs them.\n'
+  if [ "$COMPANY_PAUSED" -eq 1 ]; then
+    printf 'not run (company paused) - GitHub authentication, project clone refresh,\n'
+    printf 'secondmate liveness and convergence, pending handoff delivery, and the\n'
+    printf 'inactive-outcome scan admit no new work, so only detect-only checks ran.\n'
+    printf 'Chat, control, and queued records remain available; resume through the\n'
+    printf 'company control CLI to admit work again.\n'
+  else
+    printf 'skipped (read-only session) - GitHub authentication, project clone refresh,\n'
+    printf 'secondmate liveness and convergence, and pending handoff delivery were not run.\n'
+    printf 'They need the fleet lock, and this session must not spawn, steer, or merge, so it\n'
+    printf 'has no action they would gate. The session holding the lock runs them.\n'
+  fi
 else
   "$SCRIPT_DIR/fm-startup-network.sh" harvest --pid $$ 2>&1 || true
 fi
@@ -912,7 +968,15 @@ print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 # --- 9. closing reminder -----------------------------------------------
 stage next-step
 section "NEXT STEP"
-if [ "$READ_ONLY" -eq 1 ]; then
+if [ "$READ_ONLY" -eq 1 ] && [ "$COMPANY_PAUSED" -eq 1 ]; then
+  cat <<'EOF'
+Company work is paused. This session holds the fleet lock but admits no new
+business work: do not spawn, steer, or start mutating startup steps. Chat,
+control, inspection, and every queued record remain available and are never
+erased. Resume through the company control CLI to admit work again.
+
+EOF
+elif [ "$READ_ONLY" -eq 1 ]; then
   cat <<'EOF'
 This session did not acquire the fleet lock. Stay read-only: do not arm,
 drain, spawn, steer, merge, or repair fleet state from here. Only a session

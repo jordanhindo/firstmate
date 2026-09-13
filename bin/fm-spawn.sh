@@ -323,6 +323,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-company-pause-lib.sh
+. "$SCRIPT_DIR/fm-company-pause-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1020,6 +1022,22 @@ fi
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 if [ "$RELAUNCH" -ne 1 ]; then
   fm_lease_forbid_branch "new-task spawn (fm-spawn)"
+fi
+# Company pause is an admission gate for business work. A fresh spawn admits a
+# new task; a relaunch starts a replacement agent into an existing task. Both are
+# business admission, so both stop here before any lifecycle lock, state
+# mutation, brief, worktree, or native effect. A conversational PRIMARY recovery
+# never comes through fm-spawn (it uses the company's own existing recovery
+# path), so gating this entrypoint cannot block it. Interrupt/exit, inspection,
+# and non-company homes remain untouched.
+company_rc=0
+fm_company_admission || company_rc=$?
+if [ "$company_rc" -eq 3 ]; then
+  echo "error: spawn refused: company work is paused; no work is admitted, including a relaunch of an existing task, until the company is resumed through its own control CLI" >&2
+  exit 1
+elif [ "$company_rc" -eq 1 ]; then
+  echo "error: spawn refused: $FM_COMPANY_ERROR" >&2
+  exit 1
 fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"

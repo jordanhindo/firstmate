@@ -11,6 +11,16 @@
 # fm_watcher_supervision_verdict (also in bin/fm-wake-lib.sh), which owns what a
 # live watcher process means per supervision model. The status fields here retain
 # the beacon-age details used in their messages.
+#
+# Company pause: in-flight task metadata is BUSINESS work, so a paused company
+# does not auto-arm supervision for it. Chat (an X-mode relay poll), registered
+# process-to-event sources, control, and queued wakes stay available and still
+# require supervision. The company-owned reader is consulted only when there is
+# metadata to judge, so a non-company or empty home pays nothing.
+
+_FM_SUP_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=bin/fm-company-pause-lib.sh
+. "$_FM_SUP_LIB_DIR/fm-company-pause-lib.sh"
 
 # Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
 fm_sup_stat_mtime() {
@@ -35,6 +45,7 @@ fm_sup_stat_mtime() {
 # Always returns 0; callers read the vars, or use fm_supervision_unhealthy below.
 fm_supervision_status() {
   local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source beat m age
+  local business_in_flight=false company_rc=0
   FM_SUP_IN_FLIGHT=0
   FM_SUP_NEEDED=false
   FM_SUP_WATCHER_FRESH=false
@@ -50,7 +61,18 @@ fm_supervision_status() {
     [ -e "$source" ] || continue
     FM_SUP_SOURCES=$((FM_SUP_SOURCES + 1))
   done
-  if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \
+  # Business in-flight metadata is the only supervision source a paused company
+  # suppresses; a malformed company configuration keeps the old (supervising)
+  # behavior and reports itself, rather than silently looking non-company.
+  [ "$FM_SUP_IN_FLIGHT" -gt 0 ] && business_in_flight=true
+  if [ "$business_in_flight" = true ]; then
+    fm_company_admission || company_rc=$?
+    case "$company_rc" in
+      3) business_in_flight=false ;;
+      1) printf 'COMPANY_PAUSE: %s\n' "$FM_COMPANY_ERROR" >&2 ;;
+    esac
+  fi
+  if [ "$business_in_flight" = true ] \
     || [ -f "$state/x-watch.check.sh" ] \
     || [ "$FM_SUP_SOURCES" -gt 0 ]; then
     FM_SUP_NEEDED=true
