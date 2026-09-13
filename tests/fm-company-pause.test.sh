@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Independent criteria: real supervision consumer with a fake company CLI transport.
-# It pins the runtime-shell side of Repair 4 (PAUSE-BUILDER-CARD.md): the company
+# It pins the runtime-shell consumer of company pause: the company
 # owns pause mode, and every runtime consumer asks the company-owned reader
 # through one shared helper. Assertions describe behavior through the real
 # consumer scripts; no implementation-source bytes are inspected.
@@ -113,11 +113,13 @@ CFG_HOME="$TMP/cfg/home"
 mkdir -p "$CFG_HOME/config"
 printf '{"stateRoot":"%s","companyRoot":"%s"}\n' "$TMP/records" "$TMP/company" > "$CFG_HOME/config/company-web.json"
 : > "$TMP/reads.cfg"
+# shellcheck disable=SC2016 # These expressions are evaluated by the child shell.
 CFG_RESULT=$(env -u LATENT_SEA_COMPANY_ROOT -u LATENT_SEA_COMPANY_STATE FM_HOME="$CFG_HOME" \
   FM_PAUSE_TEST_LOG="$TMP/reads.cfg" FM_PAUSE_TEST_MODE=paused \
   bash -c '. "$1/bin/fm-company-pause-lib.sh"; fm_company_admission; printf "%s %s\n" "$?" "$FM_COMPANY_MODE"' _ "$ROOT")
 [ "$CFG_RESULT" = "3 paused" ] || { echo "FAIL: config/company-web.json source did not resolve to paused (got '$CFG_RESULT')" >&2; exit 1; }
 [ -s "$TMP/reads.cfg" ] || { echo 'FAIL: config-file source did not call the company-owned mode reader' >&2; exit 1; }
+# shellcheck disable=SC2016 # The child shell reads the mode returned by the helper.
 if env -u LATENT_SEA_COMPANY_ROOT FM_HOME="$CFG_HOME" LATENT_SEA_COMPANY_STATE="$TMP/records" \
   bash -c '. "$1/bin/fm-company-pause-lib.sh"; fm_company_admission; [ "$FM_COMPANY_MODE" = error ]' _ "$ROOT"; then :; else
   echo 'FAIL: partial company configuration was silently treated as non-company' >&2
