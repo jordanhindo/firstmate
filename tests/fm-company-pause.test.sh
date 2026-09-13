@@ -126,6 +126,36 @@ if env -u LATENT_SEA_COMPANY_ROOT FM_HOME="$CFG_HOME" LATENT_SEA_COMPANY_STATE="
   exit 1
 fi
 
+# The runtime supports relocating config independently of FM_HOME. Resolve the
+# company through that directory and compose with the actual company CLI; a
+# missing mode in a company context is paused.
+if [ -n "${COMPANY_TEST_ROOT:-}" ]; then
+  case "$COMPANY_TEST_ROOT" in
+    /*) ;;
+    *) echo 'FAIL: COMPANY_TEST_ROOT must be an absolute company checkout' >&2; exit 1 ;;
+  esac
+  [ -f "$COMPANY_TEST_ROOT/bin/company-runtime.mjs" ] || {
+    echo "FAIL: COMPANY_TEST_ROOT has no bin/company-runtime.mjs: $COMPANY_TEST_ROOT" >&2
+    exit 1
+  }
+  OVERRIDE_HOME="$TMP/override/home"
+  OVERRIDE_CONFIG="$TMP/override/config"
+  OVERRIDE_STATE="$TMP/override/records"
+  mkdir -p "$OVERRIDE_HOME" "$OVERRIDE_CONFIG" "$OVERRIDE_STATE/runtime"
+  printf '{"schemaVersion":1,"id":"primary","revision":1}\n' > "$OVERRIDE_STATE/runtime/primary.json"
+  printf '{"stateRoot":"%s","companyRoot":"%s"}\n' "$OVERRIDE_STATE" "$COMPANY_TEST_ROOT" > "$OVERRIDE_CONFIG/company-web.json"
+  # shellcheck disable=SC2016 # The child shell reports helper-owned result variables.
+  OVERRIDE_RESULT=$(env -u LATENT_SEA_COMPANY_ROOT -u LATENT_SEA_COMPANY_STATE \
+    FM_HOME="$OVERRIDE_HOME" FM_CONFIG_DIR="$OVERRIDE_CONFIG" \
+    bash -c '. "$1/bin/fm-company-pause-lib.sh"; fm_company_admission; printf "%s %s\n" "$?" "$FM_COMPANY_MODE"' _ "$ROOT")
+  [ "$OVERRIDE_RESULT" = "3 paused" ] || {
+    echo "FAIL: FM_CONFIG_DIR did not compose with the actual company CLI as paused (got '$OVERRIDE_RESULT')" >&2
+    exit 1
+  }
+else
+  echo 'SKIP: paired actual-company CLI proof requires COMPANY_TEST_ROOT'
+fi
+
 # --- fresh spawn cannot admit new work or mutate while paused --------------------
 SPAWN_HOME="$TMP/spawn-home"
 mkdir -p "$SPAWN_HOME/state"

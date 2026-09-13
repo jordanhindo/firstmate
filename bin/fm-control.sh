@@ -136,6 +136,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-company-pause-lib.sh
+. "$SCRIPT_DIR/fm-company-pause-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -875,6 +877,18 @@ case "$VERB" in
     echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
     ;;
   relaunch)
+    # Company pause blocks business relaunch at the control boundary, before
+    # do_relaunch can write a checkpoint journal, append the progress note, or
+    # stop the existing agent. bin/fm-spawn.sh --relaunch re-checks admission as
+    # the final defense. Interrupt, exit, inspection, and non-company homes are
+    # untouched.
+    company_rc=0
+    fm_company_admission || company_rc=$?
+    if [ "$company_rc" -eq 3 ]; then
+      die "company work is paused; no relaunch is admitted until the company is resumed through its own control CLI"
+    elif [ "$company_rc" -eq 1 ]; then
+      die "$FM_COMPANY_ERROR"
+    fi
     do_relaunch
     ;;
 esac

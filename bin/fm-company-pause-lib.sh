@@ -12,13 +12,15 @@
 #
 # Configuration resolution order:
 #   1. explicit LATENT_SEA_COMPANY_STATE + LATENT_SEA_COMPANY_ROOT
-#   2. otherwise FM_HOME/config/company-web.json stateRoot/companyRoot
+#   2. otherwise <config-dir>/company-web.json stateRoot/companyRoot, where
+#      <config-dir> is $FM_CONFIG_DIR when set, else $FM_HOME/config
 #   3. neither source = non-company, and every caller keeps its old behavior
 # A partial or unreadable source is an error, never silently non-company.
 #
 # Pinned reader bridge:
 #   node <companyRoot>/bin/company-runtime.mjs company-state --admission true
-#   env LATENT_SEA_COMPANY_STATE=<absolute records root>, FM_HOME=<current home>
+#   env LATENT_SEA_COMPANY_STATE=<absolute records root>
+#       LATENT_SEA_COMPANY_ROOT=<absolute code root>, FM_HOME=<current home>
 # Exit 0 = running, exit 3 = paused, anything else = malformed/unreadable and
 # therefore blocked with a diagnostic. The resolved roots are scoped to the child
 # command only; they are never exported into this shell. The reader does not write.
@@ -32,9 +34,11 @@
 #   FM_COMPANY_ROOT    absolute company code root (configured only)
 #   FM_COMPANY_STATE   absolute records root (configured only)
 #   FM_COMPANY_ERROR   one-line diagnostic when the configuration is refused
+# Reads <config-dir>/company-web.json, where <config-dir> is FM_CONFIG_DIR when
+# set and otherwise <home>/config.
 # Returns 0 configured, 1 non-company, 2 partial/bad configuration.
 fm_company_config_resolve() {
-  local home=${1:-${FM_HOME:-}} cfg parsed state_root company_root
+  local home=${1:-${FM_HOME:-}} cfg_dir cfg parsed state_root company_root
   FM_COMPANY_KIND=none
   FM_COMPANY_ROOT=
   FM_COMPANY_STATE=
@@ -49,7 +53,8 @@ fm_company_config_resolve() {
     state_root=$LATENT_SEA_COMPANY_STATE
     company_root=$LATENT_SEA_COMPANY_ROOT
   else
-    cfg="$home/config/company-web.json"
+    cfg_dir=${FM_CONFIG_DIR:-$home/config}
+    cfg="$cfg_dir/company-web.json"
     if [ ! -e "$cfg" ] || [ -L "$cfg" ]; then
       return 1
     fi
@@ -107,7 +112,8 @@ fm_company_admission() {
     2) FM_COMPANY_MODE=error; return 1 ;;
   esac
 
-  out=$(LATENT_SEA_COMPANY_STATE="$FM_COMPANY_STATE" FM_HOME="$home" \
+  out=$(LATENT_SEA_COMPANY_STATE="$FM_COMPANY_STATE" LATENT_SEA_COMPANY_ROOT="$FM_COMPANY_ROOT" \
+    FM_HOME="$home" \
     node "$FM_COMPANY_ROOT/bin/company-runtime.mjs" company-state --admission true 2>&1) || rc=$?
   case "$rc" in
     0)

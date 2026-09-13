@@ -1494,6 +1494,36 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+test_company_pause_refuses_control_relaunch_before_checkpoint_or_stop() {
+  local dir out rc=0 before
+  dir=$(new_case companypause rl42)
+  add_ship_task "$dir" rl42 claude
+  mkdir -p "$dir/home/config" "$dir/company/bin" "$dir/records"
+  before=$(cat "$dir/home/data/rl42/brief.md")
+  cat > "$dir/company/bin/company-runtime.mjs" <<'JS'
+#!/usr/bin/env node
+process.exitCode = 3;
+JS
+  chmod +x "$dir/company/bin/company-runtime.mjs"
+  printf '{"stateRoot":"%s","companyRoot":"%s"}\n' "$dir/records" "$dir/company" > "$dir/home/config/company-web.json"
+
+  out=$(run_control "$dir" rl42 relaunch --note "must remain paused") || rc=$?
+  expect_code 1 "$rc" "paused company relaunch must refuse"
+  assert_contains "$out" "company work is paused" "refusal should name company pause"
+  [ ! -e "$dir/home/state/rl42.control-relaunch" ] \
+    || fail "paused fm-control relaunch created a checkpoint journal before refusing"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "paused fm-control relaunch stopped the existing agent before refusing"
+  [ "$(cat "$dir/home/data/rl42/brief.md")" = "$before" ] \
+    || fail "paused fm-control relaunch changed the brief before refusing"
+  pass "fm-control relaunch: company pause refuses before checkpoint, note, or stop"
+}
+
+if [ "${FM_CONTROL_RELAUNCH_PAUSE_ONLY:-0}" = 1 ]; then
+  test_company_pause_refuses_control_relaunch_before_checkpoint_or_stop
+  exit 0
+fi
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
