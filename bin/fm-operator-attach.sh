@@ -32,7 +32,9 @@ while :; do
     fi
     age=$(( ( $(date +%s) - $(stat -f %m $S/$s.status) ) / 60 ))
     last=$(cat $W/$s.stall-ack 2>/dev/null || echo 0)
-    if [ "$age" -ge "$STALL_MIN" ] && [ $(( $(date +%s) - last )) -ge $((STALL_MIN*60)) ]; then
+    # Idle at its prompt is not a stall (unread orders are the doorbell's job below); only a seat mid-turn goes stale.
+    busy=$(tmux capture-pane -p -t firstmate:fm-$s 2>/dev/null | tail -8 | grep -ci "esc to interrupt")
+    if [ "$busy" -gt 0 ] && [ "$age" -ge "$STALL_MIN" ] && [ $(( $(date +%s) - last )) -ge $((STALL_MIN*60)) ]; then
       date +%s > $W/$s.stall-ack
       fire "$s has been silent for $age minutes (stall)" "$(tmux capture-pane -p -t firstmate:fm-$s 2>/dev/null | grep -v '^\s*$' | tail -4 | cut -c1-200)"
     fi
