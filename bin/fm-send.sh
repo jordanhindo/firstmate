@@ -1022,12 +1022,12 @@ else
   case "$*" in
     /*) settle=1.2 ;;
     \$*)
-      if [ "$TARGET_HARNESS" = codex ]; then settle=1.2; else settle=0.3; fi
+      if [ "$TARGET_HARNESS" = codex ]; then settle=1.5; else settle=1.2; fi
       ;;
-    *) settle=0.3 ;;
+    *) settle=1.2 ;;
   esac
   retries=${FM_SEND_RETRIES:-3}
-  sleep_s=${FM_SEND_SLEEP:-0.4}
+  sleep_s=${FM_SEND_SLEEP:-1.0}
   # Type once, submit, verify. Only exact empty confirms delivery; every other
   # verdict preserves the loud refusal boundary. Only LOCAL targets reach this
   # block: remote text rides the inbox leg above, and remote --key exits
