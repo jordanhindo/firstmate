@@ -194,7 +194,7 @@ Every harness was instructed to issue these exact shell command strings as separ
 ```sh
 printf 'UNRELATED_EXECUTED\n'
 pgrep -fl '/bin/fm-watch.sh' || true
-source '<scratch-project>/config/x-mode.env'; bin/fm-watch-checkpoint.sh --seconds 180
+source '<scratch-project>/config/x-mode.env'; bin/fm-watch-checkpoint.sh --seconds 20
 tmux send-keys -t isolated-pi-lab "printf '%s\n' 'bin/fm-watch-arm.sh &'"; tmux send-keys -t isolated-pi-lab Enter
 bin/fm-watch-arm.sh &
 ```

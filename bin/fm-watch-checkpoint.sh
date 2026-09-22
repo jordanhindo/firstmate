@@ -4,7 +4,7 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SECONDS_ARG=${FM_CODEX_WATCH_CHECKPOINT:-180}
+SECONDS_ARG=${FM_CODEX_WATCH_CHECKPOINT:-20}
 
 usage() {
   cat <<'EOF'
@@ -43,6 +43,11 @@ case "$SECONDS_ARG" in
   ''|*[!0-9]*) echo "error: --seconds must be a positive integer" >&2; exit 2 ;;
   0) echo "error: --seconds must be greater than zero" >&2; exit 2 ;;
 esac
+
+# 2026-09-22: a foreground checkpoint is a blocking tool call in the lead's harness; while it runs, every
+# steer/doorbell queues behind it unread (Demand sat 8h and 2.5h on 180s loops). Hard cap at 20s.
+if [ "$SECONDS_ARG" -gt 20 ] 2>/dev/null; then SECONDS_ARG=20; fi
+
 
 OUT=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.out.XXXXXX") || exit 1
 ERR=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.err.XXXXXX") || {
