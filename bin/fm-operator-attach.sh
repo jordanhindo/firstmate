@@ -75,7 +75,8 @@ while :; do
 
   # Intel Mac (Chris): probe once an hour; wake Firstmate the moment it answers (Jordan: 8am then hourly).
   now=$(date +%s); lastp=$(cat $W/intel.probe 2>/dev/null || echo 0)
-  if [ $(( now - lastp )) -ge 3600 ]; then
+  # Opt-in since 2026-09-22 (intel-install-fix landed): probe only while $W/intel.watch exists.
+  if [ -f $W/intel.watch ] && [ $(( now - lastp )) -ge 3600 ]; then
     date +%s > $W/intel.probe
     if timeout 12 ssh -o ConnectTimeout=8 -o BatchMode=yes chris@100.65.45.127 uptime >/dev/null 2>&1; then
       fire "Chris's Intel Mac is ONLINE: start the unattended install + first-sound proof (item intel-install-fix)" "ssh answered at $(date '+%H:%M')"
