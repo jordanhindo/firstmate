@@ -870,6 +870,34 @@ fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
 }
 
+# _fm_lock_try_steal_mutex: acquire <lockdir>.steal, ONE level, atomically.
+# Never call fm_lock_try_acquire here: its own dead-owner recovery steals
+# through "$1.steal", so acquiring a steal mutex THAT way would recurse into
+# stealing "$lockdir.steal.steal", then "...steal.steal.steal", once per prior
+# steal-owner found dead (fm-wake-lock-steal-bug, 2026-09-22). A steal mutex
+# therefore never grows a nested steal file of its own: a live or
+# freshly-mid-acquire owner blocks like any lock, a self-held mutex (the same
+# abandoned-trap case fm_lock_try_acquire reclaims for its primary lock) and a
+# dead owner are each reclaimed with exactly one atomic remove-then-create, and
+# a losing race after that single reclaim attempt is reported as contention
+# rather than retried further.
+_fm_lock_try_steal_mutex() {  # <lockdir>
+  local lockdir=$1 pid current
+  fm_lock_try_create "$lockdir" && return 0
+  fm_current_pid current || return 1
+  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  if [ -n "$pid" ] && [ "$pid" = "$current" ]; then
+    fm_lock_remove_path "$lockdir" || true
+    fm_lock_try_create "$lockdir"
+    return
+  fi
+  if fm_pid_alive "$pid" || fm_lock_mid_acquire_is_fresh "$lockdir" "$pid"; then
+    return 1
+  fi
+  fm_lock_remove_path "$lockdir" || true
+  fm_lock_try_create "$lockdir"
+}
+
 fm_lock_try_acquire() {
   local lockdir=$1 pid steal cur rc steal_owner primary_owner current
   FM_LOCK_HELD_PID=
@@ -908,7 +936,7 @@ fm_lock_try_acquire() {
   fi
 
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  if ! _fm_lock_try_steal_mutex "$steal"; then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
     return 1
