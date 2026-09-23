@@ -29,13 +29,12 @@ mkdir -p "$STATE"
 # bin/fm-operator-attach.sh's self-heal, which used to hand-rolled its own
 # fixed "sleep 1.5 then Enter" (never verifying the paste actually landed).
 fm_wake_tmux_send_and_submit() {  # <target> <text>
-  local target=$1 text=$2 prefix i pane
-  prefix=${text:0:24}
+  local target=$1 text=$2 i pane
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || return 1
   i=0
   while [ "$i" -lt 15 ]; do
     pane=$(tmux capture-pane -p -J -t "$target" 2>/dev/null) || pane=
-    case "$pane" in *"$prefix"*) break ;; esac
+    case "$pane" in *"$text"*) break ;; esac
     sleep 0.2
     i=$((i + 1))
   done
@@ -43,7 +42,7 @@ fm_wake_tmux_send_and_submit() {  # <target> <text>
   sleep 3
   pane=$(tmux capture-pane -p -J -t "$target" 2>/dev/null) || pane=
   case "$pane" in
-    *"$prefix"*) tmux send-keys -t "$target" Enter 2>/dev/null || true ;;
+    *"$text"*) tmux send-keys -t "$target" Enter 2>/dev/null || true ;;
   esac
   return 0
 }

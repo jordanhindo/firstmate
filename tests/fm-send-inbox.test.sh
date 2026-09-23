@@ -187,6 +187,75 @@ test_failed_ring_is_still_sent() {
   pass "fm-send inbox: a failed doorbell is still a durably sent steer"
 }
 
+test_doorbell_waits_for_full_text_not_stale_prefix() {
+  local dir fakebin log captures text stale_prefix enter_line rc
+  dir="$TMP_ROOT/doorbell-prefix"; fakebin="$dir/fakebin"; log="$dir/tmux.log"
+  captures="$dir/captures"; stale_prefix="$dir/stale-prefix"
+  mkdir -p "$dir/state" "$fakebin"
+  printf 'Firstmate doorbell: read old inbox entry\n' > "$stale_prefix"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  send-keys)
+    literal=0
+    enter=0
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -l) literal=1; shift ;;
+        Enter) enter=1; shift ;;
+        *) shift ;;
+      esac
+    done
+    if [ "$literal" -eq 1 ]; then
+      printf 'type\n' >> "$FM_TMUX_LOG"
+    elif [ "$enter" -eq 1 ]; then
+      printf 'enter\n' >> "$FM_TMUX_LOG"
+      : > "$FM_ENTERED_FILE"
+    fi
+    exit 0
+    ;;
+  capture-pane)
+    n=$(cat "$FM_CAPTURE_COUNT_FILE" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    printf '%s\n' "$n" > "$FM_CAPTURE_COUNT_FILE"
+    printf 'capture:%s\n' "$n" >> "$FM_TMUX_LOG"
+    if [ -e "$FM_ENTERED_FILE" ]; then
+      exit 0
+    fi
+    if [ "$n" -lt 3 ]; then
+      cat "$FM_STALE_PREFIX_FILE"
+    else
+      printf '%s\n' "$FM_TYPED_TEXT"
+    fi
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/sleep"
+  text='Firstmate doorbell: read inbox in numeric order'
+  : > "$log"
+  : > "$captures"
+  rc=0
+  FM_STATE_OVERRIDE="$dir/state" PATH="$fakebin:$PATH" \
+    FM_TMUX_LOG="$log" FM_CAPTURE_COUNT_FILE="$captures" FM_TYPED_TEXT="$text" \
+    FM_STALE_PREFIX_FILE="$stale_prefix" FM_ENTERED_FILE="$dir/entered" \
+    bash -c '. "$1"; fm_wake_tmux_send_and_submit "seat" "$2"' _ \
+      "$ROOT/bin/fm-wake-lib.sh" "$text" || rc=$?
+  [ "$rc" -eq 0 ] || fail "doorbell helper returned $rc"
+  enter_line=$(awk '$0 == "enter" { print NR; exit }' "$log")
+  [ "$(cat "$captures")" -ge 3 ] || fail "doorbell helper submitted before the full text appeared: $(cat "$log")"
+  [ "$enter_line" -ge 5 ] || fail "doorbell helper sent Enter before the full text read-back: $(cat "$log")"
+  pass "doorbell helper waits for the full pasted text instead of a stale prefix"
+}
+
 test_harness_invocations_stay_typed() {
   local dir err typed
   # A slash command must reach the harness's own parser, on any harness.
@@ -343,6 +412,7 @@ test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
 test_pending_composer_skips_ring_advisorily
 test_failed_ring_is_still_sent
+test_doorbell_waits_for_full_text_not_stale_prefix
 test_harness_invocations_stay_typed
 test_explicit_target_stays_typed
 test_key_path_never_touches_inbox
