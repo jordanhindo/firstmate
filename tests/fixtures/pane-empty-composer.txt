@@ -1,0 +1,9 @@
+  real, current screenshots of all four views from the Studio. The worker is
+  making them now.
+
+✻ Cooked for 46s · done 1:29 PM
+                                                         2% until auto-compact
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
