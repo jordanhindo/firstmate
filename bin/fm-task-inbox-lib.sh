@@ -254,6 +254,16 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     "$abs" "$abs"
 }
 
+# The Claude lead self-heal path used this equivalent line before the inbox
+# sender adopted the current wording. It can remain in a composer after a
+# swallowed Enter, so the recovery path must recognize it for the same inbox.
+fm_task_inbox_legacy_doorbell_line() {  # <record-path>
+  local dir=${1%/*} abs
+  abs=$(cd "$dir" 2>/dev/null && pwd) || abs=$dir
+  printf 'Firstmate doorbell: read %s/*.msg in numeric order, act on each, then mv each handled file to %s/handled/.' \
+    "$abs" "$abs"
+}
+
 # Ring the doorbell, best-effort: one advisory composer pre-check, then the
 # backend's submit machinery with a minimal retry budget, verdict discarded.
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
@@ -266,11 +276,18 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # verdicts would starve a harness whose idle screen the classifier cannot
 # positively identify (that classifier is advisory here by design).
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+  local backend=$1 target=$2 rec=$3 label=${4:-} line legacy_line cstate verdict
   line=$(fm_task_inbox_doorbell_line "$rec")
+  legacy_line=$(fm_task_inbox_legacy_doorbell_line "$rec")
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
-    pending) return 1 ;;
+    pending)
+      if [ "$backend" = tmux ] \
+        && fm_wake_tmux_submit_existing_doorbell "$target" "$line" "$legacy_line"; then
+        return 0
+      fi
+      return 1
+      ;;
   esac
   # tmux rings through fm_wake_tmux_send_and_submit (bin/fm-wake-lib.sh):
   # the generic submit budget below (settle=0.3s, one Enter retry) is tuned

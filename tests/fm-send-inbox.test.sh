@@ -22,6 +22,8 @@
 #      retryable send failure that could duplicate the durable instruction.
 #   9. An unwritable inbox is a real local failure: nonzero exit, nothing
 #      typed, and a just-created pending-reply expectation is discarded.
+#  10. A repeated own doorbell already in the composer is submitted, while
+#      unrelated pending text remains protected by the skip.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
 # shellcheck disable=SC2016
@@ -174,6 +176,78 @@ test_pending_composer_skips_ring_advisorily() {
   assert_contains "$(cat "$err")" "watcher will re-ring" \
     "the skip notice should point at the re-ring"
   pass "fm-send inbox: a visibly pending composer skips the ring, and the steer stays durably sent"
+}
+
+test_pending_own_doorbell_submits_existing_text() {
+  local dir err line rc
+  dir=$(setup_case own-doorbell); err="$dir/send.err"
+  line="Firstmate doorbell: read $dir/home/state/t1.inbox/*.msg in numeric order, act on each, then mv each handled file to $dir/home/state/t1.inbox/handled/."
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  send-keys)
+    shift
+    literal=0
+    enter=0
+    typed=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -l) literal=1; shift; typed=${1:-}; shift ;;
+        Enter) enter=1; shift ;;
+        *) shift ;;
+      esac
+    done
+    if [ "$literal" -eq 1 ]; then
+      printf 'type:%s\n' "$typed" >> "$FM_SEND_LOG"
+    fi
+    if [ "$enter" -eq 1 ]; then
+      printf 'enter\n' >> "$FM_SEND_LOG"
+      : > "$FM_FAKE_TMUX_ENTERED"
+    fi
+    exit 0
+    ;;
+  display-message)
+    for arg in "$@"; do
+      case "$arg" in *cursor_y*) printf '0\n'; exit 0 ;; esac
+    done
+    exit 1
+    ;;
+  capture-pane)
+    if [ -e "$FM_FAKE_TMUX_ENTERED" ]; then
+      exit 0
+    fi
+    copies=${FM_FAKE_TMUX_COPIES:-2}
+    i=0
+    printf '❯ '
+    while [ "$i" -lt "$copies" ]; do
+      printf '%s' "$FM_FAKE_TMUX_DOORBELL"
+      i=$((i + 1))
+    done
+    printf '\n'
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/tmux"
+  run_send "$dir" "$err" FM_FAKE_TMUX_DOORBELL="$line" FM_FAKE_TMUX_ENTERED="$dir/entered" -- \
+    t1 "steer behind an unsent doorbell"; rc=$?
+  expect_code 0 "$rc" "an existing own doorbell should still count as a successful ring"
+  [ "$(grep -c '^enter$' "$dir/send.log" || true)" = 1 ] \
+    || fail "the existing own doorbell was not submitted:"$'\n'"$(cat "$dir/send.log")"
+  [ "$(grep -c '^type:' "$dir/send.log" || true)" = 0 ] \
+    || fail "the recovery path retyped an already-present doorbell:"$'\n'"$(cat "$dir/send.log")"
+  rm -f "$dir/entered"
+  run_send "$dir" "$err" FM_FAKE_TMUX_COPIES=1 FM_FAKE_TMUX_DOORBELL="$line" FM_FAKE_TMUX_ENTERED="$dir/entered" -- \
+    t1 "steer behind one unsent doorbell"; rc=$?
+  expect_code 0 "$rc" "a single existing own doorbell should still count as a successful ring"
+  [ "$(grep -c '^enter$' "$dir/send.log" || true)" = 1 ] \
+    || fail "the single existing own doorbell was not submitted:"$'\n'"$(cat "$dir/send.log")"
+  [ "$(grep -c '^type:' "$dir/send.log" || true)" = 0 ] \
+    || fail "the single-doorbell recovery path retyped the existing text:"$'\n'"$(cat "$dir/send.log")"
+  pass "fm-send inbox: repeated own doorbell text is submitted instead of skipped"
 }
 
 test_failed_ring_is_still_sent() {
@@ -535,6 +609,7 @@ test_text_steer_rides_inbox
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
 test_pending_composer_skips_ring_advisorily
+test_pending_own_doorbell_submits_existing_text
 test_failed_ring_is_still_sent
 test_doorbell_waits_for_full_text_not_stale_prefix
 test_doorbell_ignores_identical_text_in_transcript

@@ -18,17 +18,73 @@ mkdir -p "$STATE"
 # Read one tmux input row. The full pane includes transcript history, which can
 # contain an identical earlier doorbell and must never prove that this paste
 # reached the composer.
-_fm_wake_tmux_composer_contains() {  # <target> <text>
-  local target=$1 text=$2 cursor pane
+_fm_wake_tmux_composer_line() {  # <target>
+  local target=$1 cursor
   cursor=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || return 1
   case "$cursor" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  pane=$(tmux capture-pane -p -J -t "$target" -S "$cursor" -E "$cursor" 2>/dev/null) || return 1
+  tmux capture-pane -p -J -t "$target" -S "$cursor" -E "$cursor" 2>/dev/null
+}
+
+_fm_wake_tmux_composer_contains() {  # <target> <text>
+  local target=$1 text=$2 pane
+  pane=$(_fm_wake_tmux_composer_line "$target") || return 1
   case "$pane" in
     *"$text"*) return 0 ;;
   esac
   return 1
+}
+
+# True only when the current composer row is one or more exact copies of the
+# expected doorbell, allowing only the visible Claude prompt and box padding
+# around it. Transcript history and human text therefore cannot authorize an
+# Enter.
+_fm_wake_tmux_composer_is_own_doorbell() {  # <target> <text>
+  local target=$1 text=$2 pane remaining copies=0
+  pane=$(_fm_wake_tmux_composer_line "$target") || return 1
+  pane=${pane//$'\r'/}
+  case "$pane" in
+    '❯'*) pane=${pane#❯} ;;
+    '│'*)
+      pane=${pane#│}
+      case "$pane" in *'│') pane=${pane%│} ;; esac
+      ;;
+  esac
+  pane="${pane#"${pane%%[![:space:]]*}"}"
+  pane="${pane%"${pane##*[![:space:]]}"}"
+  [ -n "$text" ] || return 1
+  remaining=$pane
+  while :; do
+    case "$remaining" in
+      "$text"*)
+        remaining=${remaining#"$text"}
+        copies=$((copies + 1))
+        ;;
+      *) break ;;
+    esac
+  done
+  [ "$copies" -gt 0 ] && [ -z "$remaining" ]
+}
+
+# Submit an already-present own doorbell without typing it again. Additional
+# arguments are existing equivalent doorbell forms for the same seat. Return 0
+# only when the current composer row proved to contain one or more exact copies.
+fm_wake_tmux_submit_existing_doorbell() {  # <target> <text> [alternate-text...]
+  local target=$1 text matched=
+  shift
+  for text in "$@"; do
+    if _fm_wake_tmux_composer_is_own_doorbell "$target" "$text"; then
+      matched=$text
+      break
+    fi
+  done
+  [ -n "$matched" ] || return 1
+  tmux send-keys -t "$target" Enter 2>/dev/null || true
+  sleep 3
+  _fm_wake_tmux_composer_contains "$target" "$matched" \
+    && tmux send-keys -t "$target" Enter 2>/dev/null || true
+  return 0
 }
 
 # fm_wake_tmux_send_and_submit: type <text> into a tmux target ONCE, then
@@ -47,6 +103,9 @@ _fm_wake_tmux_composer_contains() {  # <target> <text>
 # fixed "sleep 1.5 then Enter" (never verifying the paste actually landed).
 fm_wake_tmux_send_and_submit() {  # <target> <text>
   local target=$1 text=$2 i seen=0
+  if fm_wake_tmux_submit_existing_doorbell "$target" "$text"; then
+    return 0
+  fi
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || return 1
   i=0
   while [ "$i" -lt 15 ]; do
