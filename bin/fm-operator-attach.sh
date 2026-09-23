@@ -32,6 +32,10 @@ export FM_ROOT_OVERRIDE FM_HOME FM_STATE_OVERRIDE
 ring_doorbell() {  # <target> <text>
   bash -c '. "$1/bin/fm-wake-lib.sh" && fm_wake_tmux_send_and_submit "$2" "$3"' _ "$FMROOT" "$1" "$2"
 }
+TAB=$(printf '\t')
+pane_hash() {  # <text on stdin> -> hash
+  if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
+}
 NODE=/Users/jordanhindo/.nvm/versions/node/v24.14.0/bin/node
 start=$(date +%s)
 for s in $SEATS; do [ -f $W/$s.lines ] || wc -l < $S/$s.status | tr -d ' ' > $W/$s.lines; done
@@ -46,13 +50,30 @@ while :; do
       hot=$(printf '%s\n' "$new" | grep -v -E 'key=(child-outcome|inactive-outcome)-' | grep -E '^(needs-decision|blocked|failed)|^done \[corr=.*(ready|delivered|landed|Desktop|opened|merged)|URGENT|awaits? Jordan|needs Jordan|captain-held' | cut -c1-400)
       [ -n "$hot" ] && fire "$s reported something that needs Firstmate" "$hot"
     fi
-    age=$(( ( $(date +%s) - $(stat -f %m $S/$s.status) ) / 60 ))
-    last=$(cat $W/$s.stall-ack 2>/dev/null || echo 0)
-    # Idle at its prompt is not a stall (unread orders are the doorbell's job below); only a seat mid-turn goes stale.
-    busy=$(tmux capture-pane -p -t firstmate:fm-$s 2>/dev/null | tail -8 | grep -ci "esc to interrupt")
-    if [ "$busy" -gt 0 ] && [ "$age" -ge "$STALL_MIN" ] && [ $(( $(date +%s) - last )) -ge $((STALL_MIN*60)) ]; then
-      date +%s > $W/$s.stall-ack
-      fire "$s has been silent for $age minutes (stall)" "$(tmux capture-pane -p -t firstmate:fm-$s 2>/dev/null | grep -v '^\s*$' | tail -4 | cut -c1-200)"
+    # Idle at its prompt is not a stall (unread orders are the doorbell's job below); only a seat mid-turn goes
+    # stale, and only when its PANE has stopped changing for STALL_MIN - the status file's age alone false-fired
+    # on a seat that just started a fresh turn after sitting idle for hours (Demand 17:23/17:58, 2026-09-22):
+    # its status file was old, but the pane was actively working under a minute in.
+    pane_now=$(tmux capture-pane -p -t firstmate:fm-$s 2>/dev/null | tail -8)
+    busy=$(printf '%s' "$pane_now" | grep -ci "esc to interrupt")
+    if [ "$busy" -gt 0 ]; then
+      hash_now=$(printf '%s' "$pane_now" | pane_hash)
+      prev=$(cat $W/$s.pane 2>/dev/null || echo "")
+      prev_hash=${prev%%"$TAB"*}
+      prev_time=${prev#*"$TAB"}
+      if [ "$hash_now" != "$prev_hash" ]; then
+        # Pane moved (or this is the first busy sighting of this turn): reset the unchanged-since baseline.
+        # ponytail: a same-hash false-negative right at a turn boundary (new turn happens to render byte-identical
+        # to the last stalled frame) is possible but unobserved; add an idle-triggered $W/$s.pane reset if it fires.
+        printf '%s%s%s\n' "$hash_now" "$TAB" "$(date +%s)" > $W/$s.pane
+      else
+        unchanged=$(( $(date +%s) - prev_time ))
+        last=$(cat $W/$s.stall-ack 2>/dev/null || echo 0)
+        if [ "$unchanged" -ge $((STALL_MIN*60)) ] && [ $(( $(date +%s) - last )) -ge $((STALL_MIN*60)) ]; then
+          date +%s > $W/$s.stall-ack
+          fire "$s has shown no pane change for $((unchanged/60)) minutes while mid-turn (stall)" "$(printf '%s' "$pane_now" | grep -v '^\s*$' | tail -4 | cut -c1-200)"
+        fi
+      fi
     fi
     tmux list-windows -t firstmate -F '#{window_name}' 2>/dev/null | grep -qx "fm-$s" || fire "$s lead window is gone"
     # Runtime defect found 2026-09-21: fm-send types its doorbell into a Claude lead's input box but the
