@@ -16,6 +16,22 @@ export LATENT_SEA_COMPANY_STATE=$HOME/.local/share/latent-sea-company/runtime-st
 SEATS="product-and-release demand-and-brand"   # demand is running ONE narrow job (site layout fix), 2026-09-21
 STALL_MIN=${STALL_MIN:-40}      # a lead with no status line for this long = stall
 HEARTBEAT_MIN=${HEARTBEAT_MIN:-55}
+# Shared doorbell type-and-submit (fm_wake_tmux_send_and_submit, bin/fm-wake-lib.sh):
+# the same poll-until-shown-then-Enter helper bin/fm-send.sh's tmux doorbell
+# ring uses, so this self-heal and fm-send cannot drift onto two different
+# guesses about how long a pasted line takes to land (fm-send-doorbell-stuck,
+# 2026-09-22). This script runs under `sh` (it is launched as `sh
+# fm-operator-attach.sh`, not executed via its own shebang), and fm-wake-lib.sh
+# is bash-only (process substitution, arrays) - sourcing it directly here would
+# hand its bash syntax to whatever `sh` is and fail on every doorbell. Every
+# call runs it through an actual `bash -c` instead, exactly like the
+# fm-control.sh call below already relies on its OWN shebang rather than this
+# script's interpreter.
+FM_ROOT_OVERRIDE=$FMROOT FM_HOME=$FMH FM_STATE_OVERRIDE=$S
+export FM_ROOT_OVERRIDE FM_HOME FM_STATE_OVERRIDE
+ring_doorbell() {  # <target> <text>
+  bash -c '. "$1/bin/fm-wake-lib.sh" && fm_wake_tmux_send_and_submit "$2" "$3"' _ "$FMROOT" "$1" "$2"
+}
 NODE=/Users/jordanhindo/.nvm/versions/node/v24.14.0/bin/node
 start=$(date +%s)
 for s in $SEATS; do [ -f $W/$s.lines ] || wc -l < $S/$s.status | tr -d ' ' > $W/$s.lines; done
@@ -59,10 +75,9 @@ while :; do
       p2=$(tmux capture-pane -p -t firstmate:fm-$s 2>/dev/null | tail -12)
       if ! printf '%s' "$p2" | grep -q "esc to interrupt"; then
         # Idle with unread mail: type the doorbell ourselves and submit it. Text-agnostic (fm-send's own
-        # line may never have landed); a settle before Enter so Claude's composer does not eat it.
-        tmux send-keys -t firstmate:fm-$s -l "Firstmate doorbell: read $S/$s.inbox/*.msg in numeric order, act on each, then mv each handled file to $S/$s.inbox/handled/."
-        sleep 1.5
-        tmux send-keys -t firstmate:fm-$s Enter
+        # line may never have landed). ring_doorbell waits for the pane to show the pasted line before
+        # sending Enter, and sends one more Enter if it still sits there after ~3s.
+        ring_doorbell "firstmate:fm-$s" "Firstmate doorbell: read $S/$s.inbox/*.msg in numeric order, act on each, then mv each handled file to $S/$s.inbox/handled/."
       fi
     fi
     # Known silent killers, caught by name instead of waiting 40 minutes: quota, sleep, provider errors.

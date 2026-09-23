@@ -272,6 +272,16 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   case "$cstate" in
     pending) return 1 ;;
   esac
+  # tmux rings through fm_wake_tmux_send_and_submit (bin/fm-wake-lib.sh):
+  # the generic submit budget below (settle=0.3s, one Enter retry) is tuned
+  # for an ordinary short reply, and a long literal doorbell line can still be
+  # rendering in the composer when that budget's Enter fires, leaving it
+  # typed but unsent (fm-send-doorbell-stuck, 2026-09-22). The tmux doorbell
+  # instead waits for the pane to prove the text landed before submitting.
+  if [ "$backend" = tmux ]; then
+    fm_wake_tmux_send_and_submit "$target" "$line" || return 2
+    return 0
+  fi
   if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label" 2>/dev/null); then
     return 2
   fi

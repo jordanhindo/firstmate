@@ -15,6 +15,39 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 _FM_UNAME=$(uname 2>/dev/null || echo unknown)
 mkdir -p "$STATE"
 
+# fm_wake_tmux_send_and_submit: type <text> into a tmux target ONCE, then
+# submit it reliably. `tmux send-keys -l` for a long literal line (the
+# constant doorbell line, self-describing on purpose - see
+# bin/fm-task-inbox-lib.sh) can still be rendering in the target composer when
+# Enter follows immediately after a fixed short sleep, so the Enter lands
+# before the paste settles and the line sits typed but unsent
+# (fm-send-doorbell-stuck, 2026-09-22). Instead: poll the pane (bounded, ~3s)
+# until it shows the typed text, THEN send Enter; if the composer still holds
+# the text after one more ~3s wait, the Enter was itself swallowed, so send
+# exactly one more. Best-effort like every doorbell ring: no return value is
+# delivery proof. Shared by bin/fm-task-inbox-lib.sh's tmux doorbell ring and
+# bin/fm-operator-attach.sh's self-heal, which used to hand-rolled its own
+# fixed "sleep 1.5 then Enter" (never verifying the paste actually landed).
+fm_wake_tmux_send_and_submit() {  # <target> <text>
+  local target=$1 text=$2 prefix i pane
+  prefix=${text:0:24}
+  tmux send-keys -t "$target" -l "$text" 2>/dev/null || return 1
+  i=0
+  while [ "$i" -lt 15 ]; do
+    pane=$(tmux capture-pane -p -J -t "$target" 2>/dev/null) || pane=
+    case "$pane" in *"$prefix"*) break ;; esac
+    sleep 0.2
+    i=$((i + 1))
+  done
+  tmux send-keys -t "$target" Enter 2>/dev/null || true
+  sleep 3
+  pane=$(tmux capture-pane -p -J -t "$target" 2>/dev/null) || pane=
+  case "$pane" in
+    *"$prefix"*) tmux send-keys -t "$target" Enter 2>/dev/null || true ;;
+  esac
+  return 0
+}
+
 # Most wake-library consumers need only queue and lock primitives, including
 # deliberately minimal recovery fixtures and remote installations.
 # Load the classifier only when a status presentation helper is actually used.
