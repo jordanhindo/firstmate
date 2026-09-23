@@ -17,7 +17,9 @@ mkdir -p "$STATE"
 
 # Read the Claude composer bounds around the cursor. The full pane includes
 # transcript history, which can contain an identical earlier doorbell and must
-# never prove that this paste reached the composer.
+# never prove that this paste reached the composer. Current Claude also renders
+# a borderless composer between two solid `─` rules, with the footer below the
+# lower rule; keep that shape bounded instead of falling back to the footer row.
 _fm_wake_tmux_composer_bounds() {  # <target> -> <top><tab><bottom>
   local target=$1 cursor pane bounds
   cursor=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || return 1
@@ -26,11 +28,24 @@ _fm_wake_tmux_composer_bounds() {  # <target> -> <top><tab><bottom>
   esac
   pane=$(tmux capture-pane -p -t "$target" -S 0 -E - 2>/dev/null) || return 1
   bounds=$(printf '%s\n' "$pane" | awk -v cursor="$cursor" '
+    BEGIN {
+      separator_top = -1
+      candidate_top = -1
+    }
     function is_top(line) {
       return line ~ /^[[:space:]]*(╭.*╮|┌.*┐|╔.*╗|┏.*┓)[[:space:]]*$/
     }
     function is_bottom(line) {
       return line ~ /^[[:space:]]*(╰.*╯|└.*┘|╚.*╝|┗.*┛)[[:space:]]*$/
+    }
+    function is_separator(line) {
+      rest = line
+      gsub(/─/, "", rest)
+      return line ~ /^[[:space:]]*─.*─[[:space:]]*$/ \
+        && rest ~ /^[[:space:]]*$/
+    }
+    function has_agent_glyph(line) {
+      return line ~ /^[[:space:]]*(❯|›|⟩|→)/
     }
     {
       row = NR - 1
@@ -39,10 +54,31 @@ _fm_wake_tmux_composer_bounds() {  # <target> -> <top><tab><bottom>
         printf "%s\t%s\n", top, row
         exit
       }
+      if (is_separator($0)) {
+        if (separator_top >= 0 && separator_has_agent) {
+          candidate_top = separator_top
+          candidate_bottom = row
+        }
+        separator_top = row
+        separator_has_agent = 0
+      } else if (separator_top >= 0 && has_agent_glyph($0)) {
+        separator_has_agent = 1
+      }
+    }
+    END {
+      if (candidate_top >= 0) printf "%s\t%s\n", candidate_top, candidate_bottom
     }
   ')
   [ -n "$bounds" ] || return 2
   printf '%s' "$bounds"
+}
+
+_fm_wake_tmux_composer_rule_line() {  # <trimmed-row>
+  local line=$1
+  case "$line" in *────────*) ;; *) return 1 ;; esac
+  line=${line//─/}
+  case "$line" in *[![:space:]]*) return 1 ;; esac
+  return 0
 }
 
 # Read one cursor row when a non-box adapter has no rule-bounded composer. This
@@ -86,6 +122,7 @@ _fm_wake_tmux_composer_text() {  # <target>
   while IFS= read -r line; do
     line=${line#"${line%%[![:space:]]*}"}
     line=${line%"${line##*[![:space:]]}"}
+    _fm_wake_tmux_composer_rule_line "$line" && continue
     case "$line" in
       '╭'*'╮'|'┌'*'┐'|'╔'*'╗'|'┏'*'┓'|\
       '╰'*'╯'|'└'*'┘'|'╚'*'╝'|'┗'*'┛') continue ;;
@@ -301,6 +338,14 @@ fm_path_age() {
   local path=$1 m
   m=$(fm_path_mtime "$path") || { echo 999999; return; }
   echo $(( $(date +%s) - m ))
+}
+
+# Refresh the one liveness beacon consumed by fm-supervision-lib.sh and
+# fm_watcher_supervision_verdict. Both the legacy watcher and the normal-session
+# operator attach use this helper so they publish the same freshness signal.
+fm_watcher_refresh_beacon() {  # <state-dir>
+  local state=$1
+  touch "$state/.last-watcher-beat"
 }
 
 # fm_watcher_lock_unheld <state>
