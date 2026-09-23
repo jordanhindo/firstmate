@@ -13,6 +13,15 @@ C=/Users/jordanhindo/latent-sea-company/company
 FMH=$HOME/.local/share/latent-sea-company/runtime-staging/primary
 FMROOT=$HOME/.local/share/latent-sea-company-tools/firstmate-1492153
 export LATENT_SEA_COMPANY_STATE=$HOME/.local/share/latent-sea-company/runtime-staging/records LATENT_SEA_COMPANY_ROOT=$C
+# One operator only (Jordan, 2026-09-22 19:05: "akesure naother opeteratier doesn tstart again lke that").
+# The owner is the Claude Code session that launched this script: the nearest ancestor running claude.
+owner=$$; while [ "$owner" -gt 1 ] && ! ps -o command= -p "$owner" | grep -q 'claude-code/.*/claude\|/bin/claude '; do owner=$(ps -o ppid= -p "$owner" | tr -d ' '); done
+mkdir -p "$W"; held=$(cat "$W/operator.owner" 2>/dev/null)
+if [ -n "$held" ] && [ "$held" != "$owner" ] && kill -0 "$held" 2>/dev/null && ps -o command= -p "$held" | grep -q claude; then
+  echo "REFUSED: another operator session is active (Claude pid $held, running $(ps -o etime= -p "$held" | tr -d ' ')). One controller only. Ask Jordan which session runs the company; the other must end. To hand over: the active session deletes $W/operator.owner."
+  exit 3
+fi
+echo "$owner" > "$W/operator.owner"
 SEATS="product-and-release demand-and-brand"   # demand is running ONE narrow job (site layout fix), 2026-09-21
 STALL_MIN=${STALL_MIN:-40}      # a lead with no status line for this long = stall
 HEARTBEAT_MIN=${HEARTBEAT_MIN:-55}
