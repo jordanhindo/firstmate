@@ -392,6 +392,163 @@ SH
   pass "legacy autoarm reclaim uses the fixed steal mutex name without recursion"
 }
 
+test_legacy_autoarm_reclaim_rechecks_republished_owner() {
+  local dir state lock fakebin checked release ready reclaimer replacement reclaimer_rc old_owner newpid i
+  dir=$(make_case legacy-autoarm-reclaim-race)
+  state="$dir/state"
+  lock="$state/.claude-autoarm.lock"
+  fakebin="$dir/fakebin"
+  checked="$dir/checked"
+  release="$dir/release"
+  ready="$dir/replacement-ready"
+  sleep 300 &
+  old_owner=$!
+  mkdir "$lock"
+  printf '%s\n' "$old_owner" > "$lock/pid"
+  printf 'autoarm\n' > "$lock/role"
+  printf 'old owner identity\n' > "$lock/pid-identity"
+  printf 'epoch=1 owner_pid=%s outcome=done updated_at=1\n' "$old_owner" > "$state/.claude-autoarm-epoch"
+  cat > "$fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = "$FM_AUTOARM_LOCK/pid-identity" ] && [ ! -e "$FM_AUTOARM_CHECKED" ]; then
+  : > "$FM_AUTOARM_CHECKED"
+  while [ ! -e "$FM_AUTOARM_RELEASE" ]; do
+    /bin/sleep 0.01
+  done
+fi
+exec /bin/cat "$@"
+SH
+  chmod +x "$fakebin/cat"
+  FM_AUTOARM_LOCK="$lock" FM_AUTOARM_CHECKED="$checked" FM_AUTOARM_RELEASE="$release" \
+    FM_STATE_OVERRIDE="$state" PATH="$fakebin:$PATH" \
+    bash -c '. "$1"; fm_autoarm_release_abandoned "$2" 300' _ "$LIB" "$state" \
+    > "$dir/reclaimer.out" 2>&1 &
+  reclaimer=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$checked" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$checked" ] || fail "legacy reclaimer did not reach its initial owner proof"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_remove_path "$2" || exit 20
+    fm_lock_try_create "$2" || exit 21
+    newpid=$(cat "$2/pid") || exit 22
+    fm_lock_set_role "$2" autoarm || exit 23
+    printf "%s\n" "$newpid" > "$3"
+    printf "epoch=2 owner_pid=%s outcome=done updated_at=2\n" "$newpid" > "$4"
+    sleep 2
+  ' _ "$LIB" "$lock" "$ready" "$state/.claude-autoarm-epoch" &
+  replacement=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$ready" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -s "$ready" ] || fail "replacement autoarm owner did not publish"
+  newpid=$(cat "$ready")
+  : > "$release"
+  reclaimer_rc=0
+  wait "$reclaimer" || reclaimer_rc=$?
+  wait "$replacement" || fail "replacement autoarm owner failed"
+  kill "$old_owner" 2>/dev/null || true
+  wait "$old_owner" 2>/dev/null || true
+  [ "$reclaimer_rc" -ne 0 ] || fail "stale legacy reclaimer reported success after owner replacement"
+  [ -e "$lock" ] || fail "stale legacy reclaimer deleted the replacement autoarm lock"
+  [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$newpid" ] \
+    || fail "replacement autoarm lock owner changed after stale reclaim: $(cat "$lock/pid" 2>/dev/null || true)"
+  pass "legacy autoarm reclaim refuses to remove a lock republished while it waited for the steal mutex"
+}
+
+test_concurrent_stale_steal_reclaimer_preserves_new_mutex_owner() {
+  local dir state mutex dead fakebin checked release reclaimer winner winner_rc reclaimer_rc
+  dir=$(make_case concurrent-steal-reclaim)
+  state="$dir/state"
+  mutex="$state/.contend.lock.steal"
+  fakebin="$dir/fakebin"
+  checked="$dir/checked"
+  release="$dir/release"
+  dead=$(dead_pid)
+  mkdir "$mutex"
+  printf '%s\n' "$dead" > "$mutex/pid"
+  touch -t 200001010000 "$mutex"
+  cat > "$fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = "$FM_STEAL_MUTEX/pid" ] && [ ! -e "$FM_STEAL_CHECKED" ]; then
+  : > "$FM_STEAL_CHECKED"
+  while [ ! -e "$FM_STEAL_RELEASE" ]; do
+    /bin/sleep 0.01
+  done
+fi
+exec /bin/cat "$@"
+SH
+  chmod +x "$fakebin/cat"
+  FM_STEAL_MUTEX="$mutex" FM_STEAL_CHECKED="$checked" FM_STEAL_RELEASE="$release" \
+    FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" PATH="$fakebin:$PATH" \
+    bash -c '
+      . "$1"
+      _fm_lock_try_steal_mutex "$2"
+    ' _ "$LIB" "$mutex" > "$dir/reclaimer.out" 2>&1 &
+  reclaimer=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$checked" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$checked" ] || fail "stale mutex reclaimer did not reach its owner read"
+  FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    _fm_lock_try_steal_mutex "$2" || exit 7
+    printf "%s\n" "${FM_LOCK_OWNER_DIR:-}" > "$3"
+    sleep 2
+    fm_lock_release "$2"
+  ' _ "$LIB" "$mutex" "$dir/winner-owner" &
+  winner=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$dir/winner-owner" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -s "$dir/winner-owner" ] || fail "replacement steal mutex owner did not publish"
+  : > "$release"
+  reclaimer_rc=0
+  wait "$reclaimer" || reclaimer_rc=$?
+  winner_rc=0
+  wait "$winner" || winner_rc=$?
+  [ "$winner_rc" -eq 0 ] || fail "replacement steal mutex owner failed"
+  [ "$reclaimer_rc" -ne 0 ] || fail "stale reclaimer deleted a newly published steal mutex and proceeded"
+  pass "concurrent stale steal reclaimers revalidate the mutex owner before removal"
+}
+
+test_lock_recovers_from_preexisting_recursive_steal_artifacts() {
+  local dir state lock dead rc newpid nested
+  dir=$(make_case lock-preexisting-recursive-steal)
+  state="$dir/state"
+  lock="$state/.contend.lock"
+  dead=$(dead_pid)
+  mkdir "$lock"
+  printf '%s\n' "$dead" > "$lock/pid"
+  for nested in "$lock.steal.steal" "$lock.steal.steal.steal"; do
+    mkdir "$nested"
+    printf '%s\n' "$dead" > "$nested/pid"
+  done
+  rc=0
+  newpid=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then cat "$2/pid"; else exit 7; fi
+  ' _ "$LIB" "$lock") || rc=$?
+  [ "$rc" -eq 0 ] || fail "acquirer stayed wedged by pre-existing recursive steal artifacts (rc=$rc)"
+  [ "$newpid" != "$dead" ] || fail "stale lock was not replaced after recursive artifact cleanup"
+  [ ! -e "$lock.steal.steal" ] && [ ! -L "$lock.steal.steal" ] \
+    || fail "stale recursive steal artifact remained at $lock.steal.steal"
+  [ ! -e "$lock.steal.steal.steal" ] && [ ! -L "$lock.steal.steal.steal" ] \
+    || fail "stale recursive steal artifact remained at $lock.steal.steal.steal"
+  pass "stale recursive steal artifacts are removed before reclaiming the primary lock"
+}
+
 test_lock_does_not_steal_live_lock() {
   local dir state lockdir live out lockpid
   dir=$(make_case lock-live-noop)
@@ -1201,6 +1358,9 @@ test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_steal_mutex_never_creates_nested_steal_file
 test_lock_recovers_when_steal_mutex_is_also_dead
 test_legacy_autoarm_reclaim_never_creates_nested_steal_mutex
+test_legacy_autoarm_reclaim_rechecks_republished_owner
+test_concurrent_stale_steal_reclaimer_preserves_new_mutex_owner
+test_lock_recovers_from_preexisting_recursive_steal_artifacts
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate

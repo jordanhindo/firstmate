@@ -869,6 +869,27 @@ fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
 }
 
+# Remove stale recursive steal artifacts left by pre-5e6b60c builds. Each
+# candidate is revalidated immediately before removal, so a live or newly
+# published mutex remains untouched and still blocks the caller.
+_fm_lock_cleanup_recursive_steal_artifacts() {  # <lockdir>
+  local lockdir=$1 candidate=$1 owner pid depth=0
+  while [ "$depth" -lt 32 ]; do
+    candidate="$candidate.steal"
+    if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+      owner=
+      if [ -L "$candidate" ]; then
+        owner=$(fm_lock_link_owner "$candidate" 2>/dev/null || true)
+      fi
+      pid=$(cat "$candidate/pid" 2>/dev/null || true)
+      fm_lock_recheck_stale_owner "$candidate" "$owner" "$pid" || return 1
+      fm_lock_remove_path "$candidate" || return 1
+    fi
+    depth=$((depth + 1))
+  done
+  return 0
+}
+
 # _fm_lock_try_steal_mutex: acquire <lockdir>.steal, ONE level, atomically.
 # Never call fm_lock_try_acquire here: its own dead-owner recovery steals
 # through "$1.steal", so acquiring a steal mutex THAT way would recurse into
@@ -881,19 +902,26 @@ fm_recovery_marker_reopen_announced() {
 # a losing race after that single reclaim attempt is reported as contention
 # rather than retried further.
 _fm_lock_try_steal_mutex() {  # <lockdir>
-  local lockdir=$1 pid current
+  local lockdir=$1 pid current owner
   fm_lock_try_create "$lockdir" && return 0
   fm_current_pid current || return 1
+  owner=
+  if [ -L "$lockdir" ]; then
+    owner=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
+  fi
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   if [ -n "$pid" ] && [ "$pid" = "$current" ]; then
     fm_lock_remove_path "$lockdir" || true
+    _fm_lock_cleanup_recursive_steal_artifacts "$lockdir" || return 1
     fm_lock_try_create "$lockdir"
     return
   fi
   if fm_pid_alive "$pid" || fm_lock_mid_acquire_is_fresh "$lockdir" "$pid"; then
     return 1
   fi
+  fm_lock_recheck_stale_owner "$lockdir" "$owner" "$pid" || return 1
   fm_lock_remove_path "$lockdir" || true
+  _fm_lock_cleanup_recursive_steal_artifacts "$lockdir" || return 1
   fm_lock_try_create "$lockdir"
 }
 
@@ -1501,14 +1529,33 @@ fm_autoarm_claim_abandoned() {  # <state-dir> [grace]
 # upgrade-window residual instead of the deadlock.
 fm_autoarm_release_abandoned() {  # <state-dir> [grace]
   local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock steal epoch lock_pid recorded current owner line1 tmp i
+  local initial_pid initial_owner initial_identity current_owner current_identity
   lock="$state/.claude-autoarm.lock"
   steal="$lock.steal"
   epoch="$state/.claude-autoarm-epoch"
+  initial_owner=
+  if [ -L "$lock" ]; then
+    initial_owner=$(fm_lock_link_owner "$lock" 2>/dev/null || true)
+  fi
+  initial_pid=$(cat "$lock/pid" 2>/dev/null || true)
+  initial_identity=$(cat "$lock/pid-identity" 2>/dev/null || true)
   fm_autoarm_claim_abandoned "$state" "$grace" || return 1
   # The legacy lock already names the fixed steal mutex. Acquiring it through
   # the public lock path would derive a second .steal suffix if that mutex is
   # stale, so use the non-recursive one-level helper directly.
   _fm_lock_try_steal_mutex "$steal" || return 1
+  lock_pid=$(cat "$lock/pid" 2>/dev/null || true)
+  current_owner=
+  if [ -L "$lock" ]; then
+    current_owner=$(fm_lock_link_owner "$lock" 2>/dev/null || true)
+  fi
+  current_identity=$(cat "$lock/pid-identity" 2>/dev/null || true)
+  if [ "$lock_pid" != "$initial_pid" ] \
+    || [ "$current_owner" != "$initial_owner" ] \
+    || [ "$current_identity" != "$initial_identity" ]; then
+    fm_lock_release "$steal"
+    return 1
+  fi
   if ! fm_autoarm_claim_abandoned "$state" "$grace"; then
     fm_lock_release "$steal"
     return 1
