@@ -346,6 +346,22 @@ fm_meta_get() {  # <meta-file> <key>
   printf '%s' "$value"
 }
 
+# fm_meta_is_parked: true when a seat is parked by design and must never be
+# auto-revived by a liveness sweep. Two independent signals, either one
+# sufficient: the record's own `parked=1` field (the durable way to park a
+# seat in place, keeping it visible to every other reader of state/*.meta),
+# or the file itself sitting under a `parked/` directory (the earlier
+# stopgap of moving the .meta aside). Neither signal depends on the other so
+# a seat parked by moving its file is still recognized even before it also
+# gains the field (seat-auto-revival, 2026-09-22).
+fm_meta_is_parked() {  # <meta-file>
+  local meta=$1
+  case "$meta" in
+    */parked/*) return 0 ;;
+  esac
+  [ "$(fm_meta_get "$meta" parked)" = 1 ]
+}
+
 # fm_backend_of_meta: the backend recorded in <meta-file>, defaulting to
 # `tmux` when the field is absent - the P1 compatibility contract.
 fm_backend_of_meta() {  # <meta-file>

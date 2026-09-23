@@ -716,6 +716,10 @@ secondmate_liveness_one_timed() {  # <meta> <id> <label>
 secondmate_liveness_one() {  # <meta> <id>
   local meta=$1 id=$2
   local window harness backend target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend
+  if fm_meta_is_parked "$meta"; then
+    echo "SECONDMATE_LIVENESS: secondmate $id: skipped: parked by design"
+    return 0
+  fi
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] || return 0
   harness=$(fm_meta_get "$meta" harness)

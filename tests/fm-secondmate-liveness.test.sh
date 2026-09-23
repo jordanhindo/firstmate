@@ -468,6 +468,44 @@ test_sweep_reports_missing_endpoint_relaunch_failure() {
   pass "sweep: failed relaunch diagnostics distinguish a confidently missing endpoint"
 }
 
+test_sweep_skips_seat_marked_parked() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-parked-field)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  printf 'parked=1\n' >> "$w/home/state/sm1.meta"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  # mode=missing would otherwise be an authoritatively missing endpoint the
+  # sweep relaunches (test_sweep_respawns_authoritatively_missing_pi_secondmate);
+  # parked=1 must refuse that recovery instead (seat-auto-revival, 2026-09-22).
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: parked by design" \
+    "a seat marked parked=1 must be reported skipped, not recovered"
+  [ ! -s "$log" ] || fail "a parked seat must never be killed or respawned: $(cat "$log")"
+  pass "sweep: a seat marked parked=1 is never auto-revived"
+}
+
+test_meta_is_parked_field_and_directory_signals() {
+  local tmp
+  tmp=$(fm_test_tmproot fm-secondmate-liveness-meta-parked)
+  # shellcheck source=bin/fm-backend.sh
+  . "$ROOT/bin/fm-backend.sh"
+
+  printf 'kind=secondmate\n' > "$tmp/plain.meta"
+  fm_meta_is_parked "$tmp/plain.meta" && fail "an ordinary meta must not read as parked"
+
+  printf 'kind=secondmate\nparked=1\n' > "$tmp/field.meta"
+  fm_meta_is_parked "$tmp/field.meta" || fail "parked=1 in the record must read as parked"
+
+  mkdir -p "$tmp/parked"
+  printf 'kind=secondmate\n' > "$tmp/parked/dir.meta"
+  fm_meta_is_parked "$tmp/parked/dir.meta" || fail "a .meta filed under a parked/ directory must read as parked"
+
+  pass "fm_meta_is_parked: recognizes both the parked=1 field and the parked/ directory convention"
+}
+
 test_sweep_never_acts_on_unverified_harness_dead_reading() {
   local w fb tmuxfb log out
   w=$(new_world sweep-unverified-harness)
@@ -551,6 +589,8 @@ test_sweep_respawns_authoritatively_missing_pi_signed_secondmate
 test_sweep_never_acts_on_ambiguous_existing_process
 test_sweep_never_acts_on_transient_unreadability
 test_sweep_reports_missing_endpoint_relaunch_failure
+test_sweep_skips_seat_marked_parked
+test_meta_is_parked_field_and_directory_signals
 test_sweep_never_acts_on_unverified_harness_dead_reading
 test_sweep_converges_no_retouch_once_alive
 test_sweep_skipped_under_detect_only
