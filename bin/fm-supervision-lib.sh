@@ -33,7 +33,7 @@ fm_sup_stat_mtime() {
 
 # fm_supervision_status <state-dir> [grace-seconds]
 # Populates, for the state dir at $1:
-#   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
+#   FM_SUP_IN_FLIGHT      count of state/*.meta not marked parked=1 (in-flight tasks)
 #   FM_SUP_SOURCES        count of registered process-to-event sources
 #   FM_SUP_NEEDED         true/false - in-flight work, an X-mode relay poll, or a
 #                         registered event source (a source is a wait on an
@@ -54,6 +54,7 @@ fm_supervision_status() {
 
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
+    grep -q '^parked=1$' "$meta" && continue
     FM_SUP_IN_FLIGHT=$((FM_SUP_IN_FLIGHT + 1))
   done
   FM_SUP_SOURCES=0
