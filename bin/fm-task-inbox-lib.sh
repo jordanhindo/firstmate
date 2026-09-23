@@ -266,15 +266,12 @@ fm_task_inbox_legacy_doorbell_line() {  # <record-path>
 
 # Ring the doorbell, best-effort: one advisory composer pre-check, then the
 # backend's submit machinery with a minimal retry budget, verdict discarded.
-# Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
-# (the watcher re-rings later), 2 the backend send failed. No return value is
-# delivery proof; the acknowledgement move is the only delivery signal.
-# The skip is deliberately narrow: only an exact `pending` verdict defers,
-# because there our Enter could submit someone's real half-typed content.
-# `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
-# CONSTANT line the worker recovers semantically, while skipping on ambiguous
-# verdicts would starve a harness whose idle screen the classifier cannot
-# positively identify (that classifier is advisory here by design).
+# Returns 0 rang, 1 skipped because the composer holds text that is not one or
+# more exact copies of our own doorbell lines (the watcher re-rings later), and
+# 2 when the backend send failed. No return value is delivery proof; the
+# acknowledgement move is the only delivery signal. The backend classifier is
+# advisory, but the tmux submit helper has a final empty-or-own-doorbell guard
+# before it types or presses Enter.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line legacy_line cstate verdict
   line=$(fm_task_inbox_doorbell_line "$rec")
@@ -282,9 +279,12 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
     pending)
-      if [ "$backend" = tmux ] \
-        && fm_wake_tmux_submit_existing_doorbell "$target" "$line" "$legacy_line"; then
-        return 0
+      if [ "$backend" = tmux ]; then
+        fm_wake_tmux_submit_existing_doorbell "$target" "$line" "$legacy_line"
+        case "$?" in
+          0) return 0 ;;
+          2) return 2 ;;
+        esac
       fi
       return 1
       ;;
@@ -296,8 +296,12 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   # typed but unsent (fm-send-doorbell-stuck, 2026-09-22). The tmux doorbell
   # instead waits for the pane to prove the text landed before submitting.
   if [ "$backend" = tmux ]; then
-    fm_wake_tmux_send_and_submit "$target" "$line" || return 2
-    return 0
+    fm_wake_tmux_send_and_submit "$target" "$line"
+    case "$?" in
+      0) return 0 ;;
+      1) return 1 ;;
+      *) return 2 ;;
+    esac
   fi
   if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label" 2>/dev/null); then
     return 2

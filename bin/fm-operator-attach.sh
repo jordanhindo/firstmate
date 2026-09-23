@@ -104,9 +104,10 @@ while :; do
       fi
       p2=$(tmux capture-pane -p -t firstmate:fm-$s 2>/dev/null | tail -12)
       if ! printf '%s' "$p2" | grep -q "esc to interrupt"; then
-        # Idle with unread mail: type the doorbell ourselves and submit it. Text-agnostic (fm-send's own
-        # line may never have landed). ring_doorbell waits for the pane to show the pasted line before
-        # sending Enter, and sends one more Enter if it still sits there after ~3s.
+        # Idle with unread mail: submit our existing doorbell, or type it only into an empty composer.
+        # Unrelated composer text stays protected even when fm-send's own line may never have landed.
+        # ring_doorbell waits for the pane to show the pasted line before sending one Enter, then reports
+        # failure if the composer remains populated after ~3s.
         ring_doorbell "firstmate:fm-$s" "Firstmate doorbell: read $S/$s.inbox/*.msg in numeric order, act on each, then mv each handled file to $S/$s.inbox/handled/."
       fi
     fi

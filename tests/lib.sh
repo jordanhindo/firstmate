@@ -78,10 +78,11 @@ fm_test_pid_identity() {
     '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid"
 }
 
-FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
-  rm -f "$FM_TEST_CLEANUP_REGISTRY"
-  return 1
-}
+# Some restricted test runners deny process inspection even though the test
+# itself can run normally. Keep the cleanup marker, but let the age check in
+# fm_test_reap_orphans decide whether an unverified owner is stale.
+FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$" 2>/dev/null) || \
+  FM_TEST_OWNER_IDENTITY="unverified-pid=$$"
 
 fm_test_cleanup() {
   local d

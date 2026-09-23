@@ -15,10 +15,40 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 _FM_UNAME=$(uname 2>/dev/null || echo unknown)
 mkdir -p "$STATE"
 
-# Read one tmux input row. The full pane includes transcript history, which can
-# contain an identical earlier doorbell and must never prove that this paste
-# reached the composer.
-_fm_wake_tmux_composer_line() {  # <target>
+# Read the Claude composer bounds around the cursor. The full pane includes
+# transcript history, which can contain an identical earlier doorbell and must
+# never prove that this paste reached the composer.
+_fm_wake_tmux_composer_bounds() {  # <target> -> <top><tab><bottom>
+  local target=$1 cursor pane bounds
+  cursor=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || return 1
+  case "$cursor" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  pane=$(tmux capture-pane -p -t "$target" -S 0 -E - 2>/dev/null) || return 1
+  bounds=$(printf '%s\n' "$pane" | awk -v cursor="$cursor" '
+    function is_top(line) {
+      return line ~ /^[[:space:]]*(╭.*╮|┌.*┐|╔.*╗|┏.*┓)[[:space:]]*$/
+    }
+    function is_bottom(line) {
+      return line ~ /^[[:space:]]*(╰.*╯|└.*┘|╚.*╝|┗.*┛)[[:space:]]*$/
+    }
+    {
+      row = NR - 1
+      if (row <= cursor && is_top($0)) top = row
+      if (row >= cursor && is_bottom($0) && top != "") {
+        printf "%s\t%s\n", top, row
+        exit
+      }
+    }
+  ')
+  [ -n "$bounds" ] || return 2
+  printf '%s' "$bounds"
+}
+
+# Read one cursor row when a non-box adapter has no rule-bounded composer. This
+# fallback preserves the existing bare-composer path without weakening the box
+# path, which always reads the complete Claude region first.
+_fm_wake_tmux_composer_cursor_line() {  # <target>
   local target=$1 cursor
   cursor=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || return 1
   case "$cursor" in
@@ -27,64 +57,120 @@ _fm_wake_tmux_composer_line() {  # <target>
   tmux capture-pane -p -J -t "$target" -S "$cursor" -E "$cursor" 2>/dev/null
 }
 
-_fm_wake_tmux_composer_contains() {  # <target> <text>
-  local target=$1 text=$2 pane
-  pane=$(_fm_wake_tmux_composer_line "$target") || return 1
-  case "$pane" in
-    *"$text"*) return 0 ;;
+# Capture the entire Claude composer region with tmux's wrapped rows joined.
+# The first capture locates the live box, and the second capture joins only
+# that box so transcript history cannot satisfy a doorbell check.
+_fm_wake_tmux_composer_region() {  # <target>
+  local target=$1 bounds top bottom
+  bounds=$(_fm_wake_tmux_composer_bounds "$target"); case $? in
+    0) ;;
+    2) return 2 ;;
+    *) return 1 ;;
   esac
-  return 1
+  IFS=$(printf '\t') read -r top bottom <<EOF
+$bounds
+EOF
+  tmux capture-pane -p -J -t "$target" -S "$top" -E "$bottom" 2>/dev/null
 }
 
-# True only when the current composer row is one or more exact copies of the
-# expected doorbell, allowing only the visible Claude prompt and box padding
-# around it. Transcript history and human text therefore cannot authorize an
-# Enter.
-_fm_wake_tmux_composer_is_own_doorbell() {  # <target> <text>
-  local target=$1 text=$2 pane remaining copies=0
-  pane=$(_fm_wake_tmux_composer_line "$target") || return 1
-  pane=${pane//$'\r'/}
-  case "$pane" in
-    '❯'*) pane=${pane#❯} ;;
-    '│'*)
-      pane=${pane#│}
-      case "$pane" in *'│') pane=${pane%│} ;; esac
-      ;;
-  esac
-  pane="${pane#"${pane%%[![:space:]]*}"}"
-  pane="${pane%"${pane##*[![:space:]]}"}"
-  [ -n "$text" ] || return 1
-  remaining=$pane
-  while :; do
-    case "$remaining" in
-      "$text"*)
-        remaining=${remaining#"$text"}
-        copies=$((copies + 1))
+# Return the typed text from the whole composer region. Box furniture, the
+# Claude prompt glyph, row padding, and wrapped-row boundaries are removed.
+_fm_wake_tmux_composer_text() {  # <target>
+  local target=$1 region rc line text= first=1
+  region=$(_fm_wake_tmux_composer_region "$target"); rc=$?
+  if [ "$rc" -eq 2 ]; then
+    region=$(_fm_wake_tmux_composer_cursor_line "$target") || return 1
+  elif [ "$rc" -ne 0 ]; then
+    return "$rc"
+  fi
+  while IFS= read -r line; do
+    line=${line#"${line%%[![:space:]]*}"}
+    line=${line%"${line##*[![:space:]]}"}
+    case "$line" in
+      '╭'*'╮'|'┌'*'┐'|'╔'*'╗'|'┏'*'┓'|\
+      '╰'*'╯'|'└'*'┘'|'╚'*'╝'|'┗'*'┛') continue ;;
+      '│'*)
+        line=${line#│}
+        case "$line" in *'│') line=${line%│} ;; esac
         ;;
-      *) break ;;
     esac
+    line=${line#"${line%%[![:space:]]*}"}
+    line=${line%"${line##*[![:space:]]}"}
+    if [ "$first" -eq 1 ]; then
+      case "$line" in
+        '❯'*) line=${line#❯} ;;
+      esac
+      line=${line#"${line%%[![:space:]]*}"}
+      first=0
+    fi
+    text=$text$line
+  done <<EOF
+$region
+EOF
+  printf '%s' "${text//$'\r'/}"
+}
+
+# True only when the composer text is a non-empty concatenation of known
+# doorbell variants. Capture-side wrap separators are ignored, but every
+# non-whitespace byte must still belong to a known doorbell. Human text and
+# partial variants therefore cannot authorize an Enter.
+_fm_wake_tmux_text_is_doorbell_concat() {  # <text> <variant...>
+  local remaining=$1 variant compact_variant matched copies=0
+  shift
+  [ -n "$remaining" ] && [ "$#" -gt 0 ] || return 1
+  remaining=$(printf '%s' "$remaining" | tr -d '[:space:]')
+  [ -n "$remaining" ] || return 1
+  while [ -n "$remaining" ]; do
+    matched=0
+    for variant in "$@"; do
+      [ -n "$variant" ] || continue
+      compact_variant=$(printf '%s' "$variant" | tr -d '[:space:]')
+      case "$remaining" in
+        "$compact_variant"*)
+          remaining=${remaining#"$compact_variant"}
+          copies=$((copies + 1))
+          matched=1
+          break
+          ;;
+      esac
+    done
+    [ "$matched" -eq 1 ] || return 1
   done
-  [ "$copies" -gt 0 ] && [ -z "$remaining" ]
+  [ "$copies" -gt 0 ]
+}
+
+_fm_wake_tmux_composer_is_own_doorbell() {  # <target> <text>
+  local target=$1 pane
+  shift
+  pane=$(_fm_wake_tmux_composer_text "$target") || return 1
+  _fm_wake_tmux_text_is_doorbell_concat "$pane" "$@"
+}
+
+# True only when the post-Enter composer no longer contains typed text. A pane
+# that has left the box entirely is also clear, while an unreadable capture is
+# still a failure.
+_fm_wake_tmux_composer_is_empty() {  # <target>
+  local target=$1 pane rc
+  pane=$(_fm_wake_tmux_composer_text "$target"); rc=$?
+  case "$rc" in
+    0) [ -z "$pane" ] ;;
+    2) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # Submit an already-present own doorbell without typing it again. Additional
 # arguments are existing equivalent doorbell forms for the same seat. Return 0
-# only when the current composer row proved to contain one or more exact copies.
+# after one Enter only when the composer proves empty, 1 when the text is not
+# an own doorbell, and 2 when one Enter did not clear the composer.
 fm_wake_tmux_submit_existing_doorbell() {  # <target> <text> [alternate-text...]
-  local target=$1 text matched=
+  local target=$1
   shift
-  for text in "$@"; do
-    if _fm_wake_tmux_composer_is_own_doorbell "$target" "$text"; then
-      matched=$text
-      break
-    fi
-  done
-  [ -n "$matched" ] || return 1
-  tmux send-keys -t "$target" Enter 2>/dev/null || true
+  _fm_wake_tmux_composer_is_own_doorbell "$target" "$@" || return 1
+  tmux send-keys -t "$target" Enter 2>/dev/null || return 2
   sleep 3
-  _fm_wake_tmux_composer_contains "$target" "$matched" \
-    && tmux send-keys -t "$target" Enter 2>/dev/null || true
-  return 0
+  _fm_wake_tmux_composer_is_empty "$target" && return 0
+  return 2
 }
 
 # fm_wake_tmux_send_and_submit: type <text> into a tmux target ONCE, then
@@ -93,23 +179,28 @@ fm_wake_tmux_submit_existing_doorbell() {  # <target> <text> [alternate-text...]
 # bin/fm-task-inbox-lib.sh) can still be rendering in the target composer when
 # Enter follows immediately after a fixed short sleep, so the Enter lands
 # before the paste settles and the line sits typed but unsent
-# (fm-send-doorbell-stuck, 2026-09-22). Instead: poll the composer row
-# (bounded, ~3s) until it shows the typed text, THEN send Enter; if the composer still holds
-# the text after one more ~3s wait, the Enter was itself swallowed, so send
-# exactly one more. Best-effort like every doorbell ring, but a paste that never
-# appears is reported as failure so the caller can retry. Shared by
+# (fm-send-doorbell-stuck, 2026-09-22). Instead: poll the composer region
+# (bounded, ~3s) until it shows the typed text, THEN send one Enter and verify
+# that the composer is empty. A paste that never appears or a composer that
+# stays populated is reported as failure so the caller can retry. Shared by
 # bin/fm-task-inbox-lib.sh's tmux doorbell ring and
 # bin/fm-operator-attach.sh's self-heal, which used to hand-rolled its own
 # fixed "sleep 1.5 then Enter" (never verifying the paste actually landed).
 fm_wake_tmux_send_and_submit() {  # <target> <text>
-  local target=$1 text=$2 i seen=0
-  if fm_wake_tmux_submit_existing_doorbell "$target" "$text"; then
-    return 0
-  fi
+  local target=$1 text=$2 i seen=0 existing_rc
+  fm_wake_tmux_submit_existing_doorbell "$target" "$text"; existing_rc=$?
+  case "$existing_rc" in
+    0) return 0 ;;
+    2) return 2 ;;
+  esac
+  # The backend classifier is advisory and may not recognize a multiline or
+  # newly-rendered composer. Never append our doorbell to text already there:
+  # only an empty composer may enter the type-and-submit path.
+  _fm_wake_tmux_composer_is_empty "$target" || return 1
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || return 1
   i=0
   while [ "$i" -lt 15 ]; do
-    if _fm_wake_tmux_composer_contains "$target" "$text"; then
+    if _fm_wake_tmux_composer_is_own_doorbell "$target" "$text"; then
       seen=1
       break
     fi
@@ -117,10 +208,9 @@ fm_wake_tmux_send_and_submit() {  # <target> <text>
     i=$((i + 1))
   done
   [ "$seen" -eq 1 ] || return 1
-  tmux send-keys -t "$target" Enter 2>/dev/null || true
+  tmux send-keys -t "$target" Enter 2>/dev/null || return 2
   sleep 3
-  _fm_wake_tmux_composer_contains "$target" "$text" \
-    && tmux send-keys -t "$target" Enter 2>/dev/null || true
+  _fm_wake_tmux_composer_is_empty "$target" || return 2
   return 0
 }
 

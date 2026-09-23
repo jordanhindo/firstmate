@@ -108,6 +108,7 @@ run_send() {  # <case-dir> <err-file> [env...] -- <fm-send args...>
   : > "$dir/send.log"
   env PATH="$dir/fakebin:$PATH" \
     FM_ROOT_OVERRIDE="$dir/home" FM_HOME="$dir/home" FM_SEND_LOG="$dir/send.log" \
+    FM_SEND_CAPTURE_LOG="$dir/send.capture.log" \
     FM_SEND_SETTLE=0 ${envs[@]+"${envs[@]}"} \
     "$SEND" "$@" >/dev/null 2>"$err"
 }
@@ -178,10 +179,8 @@ test_pending_composer_skips_ring_advisorily() {
   pass "fm-send inbox: a visibly pending composer skips the ring, and the steer stays durably sent"
 }
 
-test_pending_own_doorbell_submits_existing_text() {
-  local dir err line rc
-  dir=$(setup_case own-doorbell); err="$dir/send.err"
-  line="Firstmate doorbell: read $dir/home/state/t1.inbox/*.msg in numeric order, act on each, then mv each handled file to $dir/home/state/t1.inbox/handled/."
+make_doorbell_region_stub() {
+  local dir=$1
   cat > "$dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -204,52 +203,200 @@ case "${1:-}" in
     fi
     if [ "$enter" -eq 1 ]; then
       printf 'enter\n' >> "$FM_SEND_LOG"
-      : > "$FM_FAKE_TMUX_ENTERED"
+      count=$(cat "${FM_FAKE_TMUX_ENTER_COUNT:-/dev/null}" 2>/dev/null || printf '0')
+      printf '%s\n' "$((count + 1))" > "${FM_FAKE_TMUX_ENTER_COUNT:-/dev/null}"
+      if [ "${FM_FAKE_TMUX_CLEAR_ON_ENTER:-1}" = 1 ] \
+        && [ -n "${FM_FAKE_TMUX_ENTERED:-}" ]; then
+        : > "$FM_FAKE_TMUX_ENTERED"
+      fi
     fi
     exit 0
     ;;
   display-message)
     for arg in "$@"; do
-      case "$arg" in *cursor_y*) printf '0\n'; exit 0 ;; esac
+      case "$arg" in *cursor_y*) printf '%s\n' "${FM_FAKE_TMUX_CURSOR:-0}"; exit 0 ;; esac
     done
     exit 1
     ;;
   capture-pane)
-    if [ -e "$FM_FAKE_TMUX_ENTERED" ]; then
+    start=0
+    end=-
+    joined=0
+    previous=
+    for arg in "$@"; do
+      case "$previous" in
+        -S) start=$arg ;;
+        -E) end=$arg ;;
+      esac
+      case "$arg" in
+        -J) joined=1 ;;
+      esac
+      previous=$arg
+    done
+    if [ -n "${FM_FAKE_TMUX_ENTERED:-}" ] \
+      && [ -e "$FM_FAKE_TMUX_ENTERED" ] \
+      && [ "${FM_FAKE_TMUX_CLEAR_ON_ENTER:-1}" = 1 ]; then
       exit 0
     fi
-    copies=${FM_FAKE_TMUX_COPIES:-2}
-    i=0
-    printf '❯ '
-    while [ "$i" -lt "$copies" ]; do
-      printf '%s' "$FM_FAKE_TMUX_DOORBELL"
-      i=$((i + 1))
-    done
-    printf '\n'
+    printf '%s\t%s\t%s\n' "$joined" "$start" "$end" >> "${FM_SEND_CAPTURE_LOG:-/dev/null}"
+    if [ "$joined" -eq 1 ] && [ "$start" = "${FM_FAKE_TMUX_REGION_START:-}" ] \
+      && [ "$end" = "${FM_FAKE_TMUX_REGION_END:-}" ] \
+      && [ -n "${FM_FAKE_TMUX_JOINED_CAPTURE:-}" ]; then
+      cat "$FM_FAKE_TMUX_JOINED_CAPTURE"
+      exit 0
+    fi
+    if [ "${FM_FAKE_TMUX_CLASSIFIER_UNPROVEN:-0}" = 1 ]; then
+      for arg in "$@"; do
+        if [ "$arg" = -e ]; then
+          printf 'unclassified screen\n'
+          exit 0
+        fi
+      done
+    fi
+    awk -v start="$start" -v end="$end" '
+      {
+        row = NR - 1
+        if (row >= start && (end == "-" || row <= end)) print
+      }
+    ' "$FM_FAKE_TMUX_SCREEN"
     exit 0
     ;;
 esac
 exit 0
 SH
   chmod +x "$dir/fakebin/tmux"
-  run_send "$dir" "$err" FM_FAKE_TMUX_DOORBELL="$line" FM_FAKE_TMUX_ENTERED="$dir/entered" -- \
-    t1 "steer behind an unsent doorbell"; rc=$?
-  expect_code 0 "$rc" "an existing own doorbell should still count as a successful ring"
-  [ "$(grep -c '^enter$' "$dir/send.log" || true)" = 1 ] \
-    || fail "the existing own doorbell was not submitted:"$'\n'"$(cat "$dir/send.log")"
-  [ "$(grep -c '^type:' "$dir/send.log" || true)" = 0 ] \
-    || fail "the recovery path retyped an already-present doorbell:"$'\n'"$(cat "$dir/send.log")"
-  rm -f "$dir/entered"
-  run_send "$dir" "$err" FM_FAKE_TMUX_COPIES=1 FM_FAKE_TMUX_DOORBELL="$line" FM_FAKE_TMUX_ENTERED="$dir/entered" -- \
-    t1 "steer behind one unsent doorbell"; rc=$?
-  expect_code 0 "$rc" "a single existing own doorbell should still count as a successful ring"
-  [ "$(grep -c '^enter$' "$dir/send.log" || true)" = 1 ] \
-    || fail "the single existing own doorbell was not submitted:"$'\n'"$(cat "$dir/send.log")"
-  [ "$(grep -c '^type:' "$dir/send.log" || true)" = 0 ] \
-    || fail "the single-doorbell recovery path retyped the existing text:"$'\n'"$(cat "$dir/send.log")"
-  pass "fm-send inbox: repeated own doorbell text is submitted instead of skipped"
+  cat > "$dir/fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$dir/fakebin/sleep"
 }
 
+doorbell_box_rule() {
+  local width=1200 rule
+  printf -v rule '%*s' "$width" ''
+  printf '%s' "${rule// /─}"
+}
+
+doorbell_box_row() {
+  local text=$1 width=1200 padding
+  padding=$((width - 1 - ${#text}))
+  [ "$padding" -ge 0 ] || fail "doorbell fixture row exceeds its Claude composer width"
+  printf '│ %s%*s│\n' "$text" "$padding" ''
+}
+
+write_doorbell_box() {  # <screen> <region> <cursor-row> <row...>
+  local screen=$1 region=$2 cursor=$3 rule row
+  shift 3
+  rule=$(doorbell_box_rule)
+  {
+    printf 'old transcript with an identical-looking phrase\n'
+    printf '╭%s╮\n' "$rule"
+    for row in "$@"; do
+      doorbell_box_row "$row"
+    done
+    printf '╰%s╯\n' "$rule"
+    printf 'footer after the composer\n'
+  } > "$screen"
+  {
+    printf '╭%s╮\n' "$rule"
+    for row in "$@"; do
+      doorbell_box_row "$row"
+    done
+    printf '╰%s╯\n' "$rule"
+  } > "$region"
+  printf '%s\n' "$cursor"
+}
+
+test_pending_multiline_human_text_stays_protected() {
+  local dir err line rc cursor screen region
+  dir=$(setup_case own-doorbell-human); err="$dir/send.err"
+  make_doorbell_region_stub "$dir"
+  line="Firstmate instruction waiting: list $dir/home/state/t1.inbox/*.msg and, in numeric order, read and act on each, then mv each handled file to $dir/home/state/t1.inbox/handled/."
+  screen="$dir/screen"; region="$dir/region"
+  cursor=$(write_doorbell_box "$screen" "$region" 3 "human text that must not be submitted" "$line")
+  run_send "$dir" "$err" FM_FAKE_TMUX_SCREEN="$screen" \
+    FM_FAKE_TMUX_JOINED_CAPTURE="$region" FM_FAKE_TMUX_REGION_START=1 \
+    FM_FAKE_TMUX_REGION_END=4 FM_FAKE_TMUX_CURSOR="$cursor" \
+    FM_FAKE_TMUX_CLASSIFIER_UNPROVEN=1 -- \
+    t1 "steer behind human text"; rc=$?
+  expect_code 0 "$rc" "human text in another composer row should stay protected"
+  [ "$(grep -c '^enter$' "$dir/send.log" || true)" = 0 ] \
+    || fail "a multiline composer containing human text was submitted:"$'\n'"$(cat "$dir/send.log")"
+  [ "$(grep -c '^type:' "$dir/send.log" || true)" = 0 ] \
+    || fail "the protected composer received a new typed doorbell:"$'\n'"$(cat "$dir/send.log")"
+  assert_contains "$(cat "$err")" "doorbell skipped" \
+    "human text should be reported as a skipped doorbell"
+  pass "fm-send inbox: human text elsewhere in the composer prevents own-doorbell recovery"
+}
+
+test_pending_own_doorbell_submits_wrapped_and_mixed_text() {
+  local dir err line legacy full split first second rc cursor screen region
+  dir=$(setup_case own-doorbell-recovery); err="$dir/send.err"
+  make_doorbell_region_stub "$dir"
+  line="Firstmate instruction waiting: list $dir/home/state/t1.inbox/*.msg and, in numeric order, read and act on each, then mv each handled file to $dir/home/state/t1.inbox/handled/."
+  legacy="Firstmate doorbell: read $dir/home/state/t1.inbox/*.msg in numeric order, act on each, then mv each handled file to $dir/home/state/t1.inbox/handled/."
+  screen="$dir/screen"; region="$dir/region"
+  full="${line}${line}"
+  split=$(( ${#full} / 2 ))
+  first=${full:0:$split}
+  second=${full:$split}
+  cursor=$(write_doorbell_box "$screen" "$region" 3 "$first" "$second")
+  {
+    printf '╭%s╮\n' "$(doorbell_box_rule)"
+    doorbell_box_row "$full"
+    printf '╰%s╯\n' "$(doorbell_box_rule)"
+  } > "$region"
+  run_send "$dir" "$err" FM_FAKE_TMUX_SCREEN="$screen" \
+    FM_FAKE_TMUX_JOINED_CAPTURE="$region" FM_FAKE_TMUX_REGION_START=1 \
+    FM_FAKE_TMUX_REGION_END=4 FM_FAKE_TMUX_CURSOR="$cursor" -- \
+    t1 "steer behind wrapped copies"; rc=$?
+  expect_code 0 "$rc" "wrapped repeated own doorbells should be submitted"
+  [ "$(grep -c '^enter$' "$dir/send.log" || true)" = 1 ] \
+    || fail "wrapped repeated doorbells should receive one Enter:"$'\n'"$(cat "$dir/send.log")"
+  [ "$(grep -c '^type:' "$dir/send.log" || true)" = 0 ] \
+    || fail "wrapped repeated doorbells were retyped:"$'\n'"$(cat "$dir/send.log")"
+  assert_contains "$(cat "$dir/send.capture.log")" $'1\t1\t4' \
+    "the recovery capture should use whole composer bounds with wrapping joined"
+
+  full="${line}${legacy}"
+  cursor=$(write_doorbell_box "$screen" "$region" 2 "$full")
+  {
+    printf '╭%s╮\n' "$(doorbell_box_rule)"
+    doorbell_box_row "$full"
+    printf '╰%s╯\n' "$(doorbell_box_rule)"
+  } > "$region"
+  rm -f "$dir/entered" "$dir/enter-count" "$dir/send.capture.log"
+  run_send "$dir" "$err" FM_FAKE_TMUX_SCREEN="$screen" \
+    FM_FAKE_TMUX_JOINED_CAPTURE="$region" FM_FAKE_TMUX_REGION_START=1 \
+    FM_FAKE_TMUX_REGION_END=3 FM_FAKE_TMUX_CURSOR="$cursor" \
+    FM_FAKE_TMUX_ENTER_COUNT="$dir/enter-count" -- \
+    t1 "steer behind mixed doorbells"; rc=$?
+  expect_code 0 "$rc" "current plus legacy doorbells should be submitted"
+  [ "$(grep -c '^enter$' "$dir/send.log" || true)" = 1 ] \
+    || fail "a current plus legacy concatenation should receive one Enter:"$'\n'"$(cat "$dir/send.log")"
+  pass "fm-send inbox: wrapped repeats and current-plus-legacy doorbell concatenations are accepted"
+}
+
+test_existing_doorbell_enter_is_at_most_once() {
+  local dir err line rc cursor screen region
+  dir=$(setup_case own-doorbell-stuck); err="$dir/send.err"
+  make_doorbell_region_stub "$dir"
+  line="Firstmate instruction waiting: list $dir/home/state/t1.inbox/*.msg and, in numeric order, read and act on each, then mv each handled file to $dir/home/state/t1.inbox/handled/."
+  screen="$dir/screen"; region="$dir/region"
+  cursor=$(write_doorbell_box "$screen" "$region" 2 "$line")
+  run_send "$dir" "$err" FM_FAKE_TMUX_SCREEN="$screen" \
+    FM_FAKE_TMUX_JOINED_CAPTURE="$region" FM_FAKE_TMUX_REGION_START=1 \
+    FM_FAKE_TMUX_REGION_END=3 FM_FAKE_TMUX_CURSOR="$cursor" \
+    FM_FAKE_TMUX_CLEAR_ON_ENTER=0 FM_FAKE_TMUX_ENTER_COUNT="$dir/enter-count" -- \
+    t1 "steer behind a non-clearing composer"; rc=$?
+  expect_code 0 "$rc" "a non-clearing composer should keep the durable steer successful"
+  [ "$(cat "$dir/enter-count")" = 1 ] \
+    || fail "a non-clearing composer received more than one Enter: $(cat "$dir/enter-count")"
+  assert_contains "$(cat "$err")" "doorbell did not reach" \
+    "a composer that stayed populated should report failed submission"
+  pass "fm-send inbox: an existing doorbell gets one Enter and reports when the composer stays populated"
+}
 test_failed_ring_is_still_sent() {
   local dir err rc
   dir=$(setup_case ringfail); err="$dir/send.err"
@@ -284,6 +431,7 @@ case "${1:-}" in
     done
     if [ "$literal" -eq 1 ]; then
       printf 'type\n' >> "$FM_TMUX_LOG"
+      : > "$FM_TYPED_FILE"
     elif [ "$enter" -eq 1 ]; then
       printf 'enter\n' >> "$FM_TMUX_LOG"
       : > "$FM_ENTERED_FILE"
@@ -302,7 +450,9 @@ case "${1:-}" in
     if [ -e "$FM_ENTERED_FILE" ]; then
       exit 0
     fi
-    if [ "$n" -lt 3 ]; then
+    if [ ! -e "$FM_TYPED_FILE" ]; then
+      printf '❯ \n'
+    elif [ "$n" -lt 4 ]; then
       cat "$FM_STALE_PREFIX_FILE"
     else
       printf '%s\n' "$FM_TYPED_TEXT"
@@ -321,10 +471,12 @@ SH
   text='Firstmate doorbell: read inbox in numeric order'
   : > "$log"
   : > "$captures"
+  rm -f "$dir/typed" "$dir/entered"
   rc=0
   FM_STATE_OVERRIDE="$dir/state" PATH="$fakebin:$PATH" \
     FM_TMUX_LOG="$log" FM_CAPTURE_COUNT_FILE="$captures" FM_TYPED_TEXT="$text" \
-    FM_STALE_PREFIX_FILE="$stale_prefix" FM_ENTERED_FILE="$dir/entered" \
+    FM_STALE_PREFIX_FILE="$stale_prefix" FM_TYPED_FILE="$dir/typed" \
+    FM_ENTERED_FILE="$dir/entered" \
     bash -c '. "$1"; fm_wake_tmux_send_and_submit "seat" "$2"' _ \
       "$ROOT/bin/fm-wake-lib.sh" "$text" || rc=$?
   [ "$rc" -eq 0 ] || fail "doorbell helper returned $rc"
@@ -609,7 +761,9 @@ test_text_steer_rides_inbox
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
 test_pending_composer_skips_ring_advisorily
-test_pending_own_doorbell_submits_existing_text
+test_pending_multiline_human_text_stays_protected
+test_pending_own_doorbell_submits_wrapped_and_mixed_text
+test_existing_doorbell_enter_is_at_most_once
 test_failed_ring_is_still_sent
 test_doorbell_waits_for_full_text_not_stale_prefix
 test_doorbell_ignores_identical_text_in_transcript
