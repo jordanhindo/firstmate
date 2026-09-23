@@ -29,8 +29,8 @@ _fm_wake_tmux_composer_bounds() {  # <target> -> <top><tab><bottom>
   pane=$(tmux capture-pane -p -t "$target" -S 0 -E - 2>/dev/null) || return 1
   bounds=$(printf '%s\n' "$pane" | awk -v cursor="$cursor" '
     BEGIN {
-      separator_top = -1
-      candidate_top = -1
+      top = -1
+      separator_count = 0
     }
     function is_top(line) {
       return line ~ /^[[:space:]]*(╭.*╮|┌.*┐|╔.*╗|┏.*┓)[[:space:]]*$/
@@ -49,24 +49,43 @@ _fm_wake_tmux_composer_bounds() {  # <target> -> <top><tab><bottom>
     }
     {
       row = NR - 1
+      pane_row[row] = $0
       if (row <= cursor && is_top($0)) top = row
-      if (row >= cursor && is_bottom($0) && top != "") {
+      if (row >= cursor && is_bottom($0) && top >= 0) {
         printf "%s\t%s\n", top, row
+        found = 1
         exit
       }
       if (is_separator($0)) {
-        if (separator_top >= 0 && separator_has_agent) {
-          candidate_top = separator_top
-          candidate_bottom = row
-        }
-        separator_top = row
-        separator_has_agent = 0
-      } else if (separator_top >= 0 && has_agent_glyph($0)) {
-        separator_has_agent = 1
+        separator[++separator_count] = row
       }
     }
     END {
-      if (candidate_top >= 0) printf "%s\t%s\n", candidate_top, candidate_bottom
+      if (found) exit
+      # A separator region is valid only when the live cursor is inside it.
+      # Pick the nearest separator above the cursor and inspect only that
+      # region; earlier transcript/composer regions are never candidates.
+      top = -1
+      for (i = 1; i <= separator_count; i++) {
+        if (separator[i] < cursor) top = separator[i]
+      }
+      if (top < 0) exit
+      bottom = -1
+      for (i = 1; i <= separator_count; i++) {
+        if (separator[i] > cursor) {
+          bottom = separator[i]
+          break
+        }
+      }
+      limit = bottom >= 0 ? bottom - 1 : cursor
+      has_agent = 0
+      for (i = top + 1; i <= limit; i++) {
+        if (has_agent_glyph(pane_row[i])) {
+          has_agent = 1
+          break
+        }
+      }
+      if (has_agent) printf "%s\t%s\n", top, (bottom >= 0 ? bottom : cursor)
     }
   ')
   [ -n "$bounds" ] || return 2

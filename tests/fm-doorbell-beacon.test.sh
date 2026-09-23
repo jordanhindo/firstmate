@@ -38,7 +38,7 @@ case "${1:-}" in
     ;;
   display-message)
     for arg in "$@"; do
-      case "$arg" in *cursor_y*) printf '8\n'; exit 0 ;; esac
+      case "$arg" in *cursor_y*) printf '6\n'; exit 0 ;; esac
     done
     exit 1
     ;;
@@ -135,12 +135,117 @@ test_horizontal_rule_composer_text_stays_protected() {
   pass "shared doorbell parser: real text in a Claude separator composer stays protected"
 }
 
+make_mixed_harness_tmux() {
+  local dir=$1
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  send-keys)
+    shift
+    while [ "$#" -gt 0 ]; do
+      [ "$1" = Enter ] && printf 'enter\n' >> "$FM_TMUX_LOG"
+      shift
+    done
+    exit 0
+    ;;
+  display-message)
+    for arg in "$@"; do
+      case "$arg" in *cursor_y*) printf '5\n'; exit 0 ;; esac
+    done
+    exit 1
+    ;;
+  capture-pane)
+    start=0
+    end=-
+    previous=
+    for arg in "$@"; do
+      case "$previous" in
+        -S) start=$arg ;;
+        -E) end=$arg ;;
+      esac
+      previous=$arg
+    done
+    if [ "$start" = 0 ] && [ "$end" = - ]; then
+      cat "$FM_FIXTURE"
+    else
+      sed -n "$((start + 1)),$((end + 1))p" "$FM_FIXTURE"
+    fi
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/tmux"
+  cat > "$dir/fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$dir/fakebin/sleep"
+}
+
+test_mixed_harness_stale_region_never_submits_live_human_draft() {
+  local dir="$TMP_ROOT/mixed-harness-stale-region" line rc
+  mkdir -p "$dir/state"
+  make_mixed_harness_tmux "$dir"
+  line='Firstmate instruction waiting: read the inbox and act on each message.'
+  {
+    printf '%s\n' '────────────────────────────────────────────────────────────────────────'
+    printf '❯ %s\n' "$line"
+    printf '%s\n' '────────────────────────────────────────────────────────────────────────'
+    printf '%s\n' 'transcript between harnesses'
+    printf '%s\n' '────────────────────────────────────────────────────────────────────────'
+    printf '%s\n' '› human draft'
+  } > "$dir/fixture.txt"
+  : > "$dir/tmux.log"
+  rc=0
+  PATH="$dir/fakebin:$PATH" \
+    FM_STATE_OVERRIDE="$dir/state" \
+    FM_FIXTURE="$dir/fixture.txt" \
+    FM_TMUX_LOG="$dir/tmux.log" \
+    bash -c '. "$1"; fm_wake_tmux_submit_existing_doorbell seat "$2"' _ \
+      "$ROOT/bin/fm-wake-lib.sh" "$line" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a mixed-harness pane with live human text must not report a successful existing-doorbell submit"
+  [ ! -s "$dir/tmux.log" ] \
+    || fail "an earlier Claude doorbell region caused Enter on the live Codex draft: $(cat "$dir/tmux.log")"
+  pass "shared doorbell parser: only the live mixed-harness composer may authorize Enter"
+}
+
+make_attach_ps() {
+  local dir=$1
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$FM_ATTACH_PS_MODE" in
+  owner)
+    for arg in "$@"; do
+      case "$arg" in *command=*) printf '/usr/local/bin/claude \n'; exit 0 ;; esac
+    done
+    ;;
+  no-owner)
+    for arg in "$@"; do
+      case "$arg" in
+        *command=*) printf '/bin/sh\n'; exit 0 ;;
+        *ppid=*) printf '1\n'; exit 0 ;;
+      esac
+    done
+    ;;
+  esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/ps"
+}
+
 make_guard_case() {
-  local dir="$TMP_ROOT/guard-beacon" home="$TMP_ROOT/guard-beacon/home"
-  mkdir -p "$home/state" "$home/config" "$TMP_ROOT/guard-beacon/root" "$TMP_ROOT/guard-beacon/company/bin"
+  local name=${1:-guard-beacon} dir home
+  dir="$TMP_ROOT/$name"
+  home="$dir/home"
+  mkdir -p "$home/state" "$home/config" "$dir/root" "$dir/company/bin"
   printf 'window=seat:fm-t1\nkind=ship\n' > "$home/state/t1.meta"
   touch -t 202001010000 "$home/state/.last-watcher-beat"
-  printf '%s\n' "$TMP_ROOT/guard-beacon"
+  printf '%s\n' "$dir"
 }
 
 run_autoarm_guard() {
@@ -154,7 +259,7 @@ run_autoarm_guard() {
 
 test_attach_beacon_refresh_makes_guard_healthy() {
   local dir stale healthy restored node
-  dir=$(make_guard_case)
+  dir=$(make_guard_case guard-beacon-healthy)
   stale=$(run_autoarm_guard "$dir")
   assert_contains "$stale" "WATCHER DOWN - SUPERVISION IS OFF" \
     "an unrefreshed attach beacon must remain stale"
@@ -165,7 +270,10 @@ test_attach_beacon_refresh_makes_guard_healthy() {
 printf '{"result":[]}\n'
 SH
   chmod +x "$node"
-  FM_OPERATOR_STATE="$dir/operator-watch" \
+  make_attach_ps "$dir" owner
+  PATH="$dir/fakebin:$PATH" \
+    FM_ATTACH_PS_MODE=owner \
+    FM_OPERATOR_STATE="$dir/operator-watch" \
     FM_OPERATOR_RUNTIME_STATE="$dir/home/state" \
     FM_OPERATOR_COMPANY_ROOT="$dir/company" \
     FM_OPERATOR_FIRSTMATE_HOME="$dir/home" \
@@ -186,6 +294,35 @@ SH
   pass "operator attach beacon contract: refresh makes fm-guard healthy and stale returns without it"
 }
 
+test_attach_without_owner_leaves_guard_stale() {
+  local dir stale
+  dir=$(make_guard_case guard-beacon-no-owner)
+  cat > "$dir/node" <<'SH'
+#!/usr/bin/env bash
+printf '{"result":[]}\n'
+SH
+  chmod +x "$dir/node"
+  make_attach_ps "$dir" no-owner
+  PATH="$dir/fakebin:$PATH" \
+    FM_ATTACH_PS_MODE=no-owner \
+    FM_OPERATOR_STATE="$dir/operator-watch" \
+    FM_OPERATOR_RUNTIME_STATE="$dir/home/state" \
+    FM_OPERATOR_COMPANY_ROOT="$dir/company" \
+    FM_OPERATOR_FIRSTMATE_HOME="$dir/home" \
+    FM_OPERATOR_FIRSTMATE_ROOT="$ROOT" \
+    FM_OPERATOR_NODE="$dir/node" \
+    FM_OPERATOR_SEATS= \
+    HEARTBEAT_MIN=0 \
+    "$ROOT/bin/fm-operator-attach.sh" >"$dir/attach-no-owner.out" 2>"$dir/attach-no-owner.err" \
+    || fail "operator attach without a Claude owner should still complete its bounded test iteration: $(cat "$dir/attach-no-owner.err")"
+  stale=$(run_autoarm_guard "$dir")
+  assert_contains "$stale" "WATCHER DOWN - SUPERVISION IS OFF" \
+    "an attach without a verified Claude owner must leave the guard stale"
+  pass "operator attach beacon contract: no verified owner leaves fm-guard stale"
+}
+
 test_empty_claude_fixture_is_submit_safe
 test_horizontal_rule_composer_text_stays_protected
+test_mixed_harness_stale_region_never_submits_live_human_draft
 test_attach_beacon_refresh_makes_guard_healthy
+test_attach_without_owner_leaves_guard_stale
