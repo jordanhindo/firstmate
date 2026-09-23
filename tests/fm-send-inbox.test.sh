@@ -216,6 +216,10 @@ case "${1:-}" in
     fi
     exit 0
     ;;
+  display-message)
+    printf '2\n'
+    exit 0
+    ;;
   capture-pane)
     n=$(cat "$FM_CAPTURE_COUNT_FILE" 2>/dev/null || echo 0)
     n=$((n + 1))
@@ -254,6 +258,126 @@ SH
   [ "$(cat "$captures")" -ge 3 ] || fail "doorbell helper submitted before the full text appeared: $(cat "$log")"
   [ "$enter_line" -ge 5 ] || fail "doorbell helper sent Enter before the full text read-back: $(cat "$log")"
   pass "doorbell helper waits for the full pasted text instead of a stale prefix"
+}
+
+test_doorbell_ignores_identical_text_in_transcript() {
+  local dir fakebin log text enter_count rc
+  dir="$TMP_ROOT/doorbell-transcript-match"; fakebin="$dir/fakebin"; log="$dir/tmux.log"
+  mkdir -p "$dir/state" "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  send-keys)
+    literal=0
+    enter=0
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -l) literal=1; shift ;;
+        Enter) enter=1; shift ;;
+        *) shift ;;
+      esac
+    done
+    if [ "$literal" -eq 1 ]; then
+      printf 'type\n' >> "$FM_TMUX_LOG"
+    elif [ "$enter" -eq 1 ]; then
+      printf 'enter\n' >> "$FM_TMUX_LOG"
+    fi
+    exit 0
+    ;;
+  display-message)
+    printf '2\n'
+    exit 0
+    ;;
+  capture-pane)
+    start=
+    previous=
+    for arg in "$@"; do
+      if [ "$previous" = -S ]; then start=$arg; fi
+      previous=$arg
+    done
+    if [ "$start" = 2 ]; then
+      printf '❯ incomplete current composer text\n'
+    else
+      printf 'old transcript: %s\n' "$FM_TYPED_TEXT"
+      printf '❯ incomplete current composer text\n'
+    fi
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/sleep"
+  text='Firstmate doorbell: identical transcript text'
+  : > "$log"
+  rc=0
+  PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" FM_TYPED_TEXT="$text" \
+    bash -c '. "$1"; fm_wake_tmux_send_and_submit "seat" "$2"' _ \
+      "$ROOT/bin/fm-wake-lib.sh" "$text" || rc=$?
+  [ "$rc" -ne 0 ] || fail "doorbell accepted identical transcript text as composer text"
+  enter_count=$(grep -c '^enter$' "$log" || true)
+  [ "$enter_count" = 0 ] || fail "doorbell submitted unrelated composer input after a transcript match"
+  pass "doorbell matches only the current composer line, not identical transcript text"
+}
+
+test_doorbell_never_submits_when_full_text_never_appears() {
+  local dir fakebin log enter_count rc
+  dir="$TMP_ROOT/doorbell-never-appears"; fakebin="$dir/fakebin"; log="$dir/tmux.log"
+  mkdir -p "$dir/state" "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  send-keys)
+    literal=0
+    enter=0
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -l) literal=1; shift ;;
+        Enter) enter=1; shift ;;
+        *) shift ;;
+      esac
+    done
+    if [ "$literal" -eq 1 ]; then
+      printf 'type\n' >> "$FM_TMUX_LOG"
+    elif [ "$enter" -eq 1 ]; then
+      printf 'enter\n' >> "$FM_TMUX_LOG"
+    fi
+    exit 0
+    ;;
+  display-message)
+    printf '2\n'
+    exit 0
+    ;;
+  capture-pane)
+    printf '❯ text that never becomes the requested doorbell\n'
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/sleep"
+  : > "$log"
+  rc=0
+  PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" \
+    bash -c '. "$1"; fm_wake_tmux_send_and_submit "seat" "Firstmate doorbell: never appears"' _ \
+      "$ROOT/bin/fm-wake-lib.sh" || rc=$?
+  [ "$rc" -ne 0 ] || fail "doorbell reported success when the full text never appeared"
+  enter_count=$(grep -c '^enter$' "$log" || true)
+  [ "$enter_count" = 0 ] || fail "doorbell sent Enter without seeing the full text"
+  pass "doorbell reports failure and does not submit when the full text never appears"
 }
 
 test_harness_invocations_stay_typed() {
@@ -413,6 +537,8 @@ test_resend_enqueues_new_sequence
 test_pending_composer_skips_ring_advisorily
 test_failed_ring_is_still_sent
 test_doorbell_waits_for_full_text_not_stale_prefix
+test_doorbell_ignores_identical_text_in_transcript
+test_doorbell_never_submits_when_full_text_never_appears
 test_harness_invocations_stay_typed
 test_explicit_target_stays_typed
 test_key_path_never_touches_inbox

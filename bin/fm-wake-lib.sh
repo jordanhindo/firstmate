@@ -15,35 +15,53 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 _FM_UNAME=$(uname 2>/dev/null || echo unknown)
 mkdir -p "$STATE"
 
+# Read one tmux input row. The full pane includes transcript history, which can
+# contain an identical earlier doorbell and must never prove that this paste
+# reached the composer.
+_fm_wake_tmux_composer_contains() {  # <target> <text>
+  local target=$1 text=$2 cursor pane
+  cursor=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || return 1
+  case "$cursor" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  pane=$(tmux capture-pane -p -J -t "$target" -S "$cursor" -E "$cursor" 2>/dev/null) || return 1
+  case "$pane" in
+    *"$text"*) return 0 ;;
+  esac
+  return 1
+}
+
 # fm_wake_tmux_send_and_submit: type <text> into a tmux target ONCE, then
 # submit it reliably. `tmux send-keys -l` for a long literal line (the
 # constant doorbell line, self-describing on purpose - see
 # bin/fm-task-inbox-lib.sh) can still be rendering in the target composer when
 # Enter follows immediately after a fixed short sleep, so the Enter lands
 # before the paste settles and the line sits typed but unsent
-# (fm-send-doorbell-stuck, 2026-09-22). Instead: poll the pane (bounded, ~3s)
-# until it shows the typed text, THEN send Enter; if the composer still holds
+# (fm-send-doorbell-stuck, 2026-09-22). Instead: poll the composer row
+# (bounded, ~3s) until it shows the typed text, THEN send Enter; if the composer still holds
 # the text after one more ~3s wait, the Enter was itself swallowed, so send
-# exactly one more. Best-effort like every doorbell ring: no return value is
-# delivery proof. Shared by bin/fm-task-inbox-lib.sh's tmux doorbell ring and
+# exactly one more. Best-effort like every doorbell ring, but a paste that never
+# appears is reported as failure so the caller can retry. Shared by
+# bin/fm-task-inbox-lib.sh's tmux doorbell ring and
 # bin/fm-operator-attach.sh's self-heal, which used to hand-rolled its own
 # fixed "sleep 1.5 then Enter" (never verifying the paste actually landed).
 fm_wake_tmux_send_and_submit() {  # <target> <text>
-  local target=$1 text=$2 i pane
+  local target=$1 text=$2 i seen=0
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || return 1
   i=0
   while [ "$i" -lt 15 ]; do
-    pane=$(tmux capture-pane -p -J -t "$target" 2>/dev/null) || pane=
-    case "$pane" in *"$text"*) break ;; esac
+    if _fm_wake_tmux_composer_contains "$target" "$text"; then
+      seen=1
+      break
+    fi
     sleep 0.2
     i=$((i + 1))
   done
+  [ "$seen" -eq 1 ] || return 1
   tmux send-keys -t "$target" Enter 2>/dev/null || true
   sleep 3
-  pane=$(tmux capture-pane -p -J -t "$target" 2>/dev/null) || pane=
-  case "$pane" in
-    *"$text"*) tmux send-keys -t "$target" Enter 2>/dev/null || true ;;
-  esac
+  _fm_wake_tmux_composer_contains "$target" "$text" \
+    && tmux send-keys -t "$target" Enter 2>/dev/null || true
   return 0
 }
 
