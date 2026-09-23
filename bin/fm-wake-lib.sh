@@ -1506,7 +1506,10 @@ fm_autoarm_release_abandoned() {  # <state-dir> [grace]
   steal="$lock.steal"
   epoch="$state/.claude-autoarm-epoch"
   fm_autoarm_claim_abandoned "$state" "$grace" || return 1
-  fm_lock_try_acquire "$steal" || return 1
+  # The legacy lock already names the fixed steal mutex. Acquiring it through
+  # the public lock path would derive a second .steal suffix if that mutex is
+  # stale, so use the non-recursive one-level helper directly.
+  _fm_lock_try_steal_mutex "$steal" || return 1
   if ! fm_autoarm_claim_abandoned "$state" "$grace"; then
     fm_lock_release "$steal"
     return 1

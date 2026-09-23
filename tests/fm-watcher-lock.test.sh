@@ -356,6 +356,42 @@ test_lock_recovers_when_steal_mutex_is_also_dead() {
   pass "a dead primary lock recovers in one step even when its steal mutex is also dead-owned, with no nested steal file"
 }
 
+test_legacy_autoarm_reclaim_never_creates_nested_steal_mutex() {
+  local dir state lock steal dead nested_marker fakebin rc
+  dir=$(make_case legacy-autoarm-steal)
+  state="$dir/state"
+  lock="$state/.claude-autoarm.lock"
+  steal="$lock.steal"
+  nested_marker="$dir/nested-steal.marker"
+  fakebin="$dir/fakebin"
+  dead=$(dead_pid)
+  mkdir "$lock" "$steal"
+  printf '%s\n' "$dead" > "$lock/pid"
+  printf 'autoarm\n' > "$lock/role"
+  printf 'epoch=1 owner_pid=%s outcome=done updated_at=1\n' "$dead" > "$state/.claude-autoarm-epoch"
+  printf '%s\n' "$dead" > "$steal/pid"
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+set -u
+last=${!#}
+case "$last" in
+  *.claude-autoarm.lock.steal.steal)
+    : > "$FM_NESTED_STEAL_MARKER"
+    ;;
+esac
+exec /bin/ln "$@"
+SH
+  chmod +x "$fakebin/ln"
+  rc=0
+  FM_NESTED_STEAL_MARKER="$nested_marker" PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1"; fm_autoarm_release_abandoned "$2" 300' _ "$LIB" "$state" || rc=$?
+  [ "$rc" -eq 0 ] || fail "legacy autoarm reclaim failed while recovering a stale steal mutex (rc=$rc)"
+  [ ! -e "$nested_marker" ] || fail "legacy autoarm reclaim attempted a nested steal mutex"
+  [ ! -e "$steal.steal" ] && [ ! -L "$steal.steal" ] \
+    || fail "legacy autoarm reclaim left a nested steal mutex at $steal.steal"
+  pass "legacy autoarm reclaim uses the fixed steal mutex name without recursion"
+}
+
 test_lock_does_not_steal_live_lock() {
   local dir state lockdir live out lockpid
   dir=$(make_case lock-live-noop)
@@ -1164,6 +1200,7 @@ test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_steal_mutex_never_creates_nested_steal_file
 test_lock_recovers_when_steal_mutex_is_also_dead
+test_legacy_autoarm_reclaim_never_creates_nested_steal_mutex
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
