@@ -115,13 +115,18 @@ while :; do
     unread=$(ls $S/$s.inbox/*.msg 2>/dev/null | wc -l | tr -d ' ')
     if [ "$unread" -gt 0 ]; then
       p2=$(tmux capture-pane -p -t "$win" 2>/dev/null | tail -12)
-      oldest=$(ls -t $S/$s.inbox/*.msg 2>/dev/null | tail -1)
-      uage=$(( ( $(date +%s) - $(stat -f %m "$oldest") ) / 60 ))
+      # Age of the NEWEST unread order: a lead already working through an old backlog is not stuck, and timing
+      # from the oldest interrupted it every 10 minutes forever (Product, 2026-09-25 after the reboot).
+      newest=$(ls -t $S/$s.inbox/*.msg 2>/dev/null | head -1)
+      uage=$(( ( $(date +%s) - $(stat -f %m "$newest") ) / 60 ))
       if printf '%s' "$p2" | grep -q "esc to interrupt"; then
         # Lead is mid-turn (often a long tool call); a queued doorbell only submits when the turn ends.
         # After 5 minutes unread, interrupt so the queue drains (2026-09-22: 8h and 40m stalls came from this).
-        if [ "$uage" -ge 5 ] && [ $(( $(date +%s) - $(cat $W/$s.int-ack 2>/dev/null || echo 0) )) -ge 600 ]; then
+        # At most one interrupt per new order: once the lead has taken its turn, the backlog is its to work through.
+        if [ "$uage" -ge 5 ] && [ "$newest" != "$(cat $W/$s.int-msg 2>/dev/null)" ] \
+          && [ $(( $(date +%s) - $(cat $W/$s.int-ack 2>/dev/null || echo 0) )) -ge 600 ]; then
           date +%s > $W/$s.int-ack
+          printf '%s' "$newest" > $W/$s.int-msg
           FM_HOME=$FMH $FMROOT/bin/fm-control.sh $s interrupt >/dev/null 2>&1
           sleep 6
         fi
