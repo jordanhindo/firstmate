@@ -73,6 +73,8 @@ while :; do
     refresh_beacon || fire "operator watcher beacon refresh failed"
   fi
   for s in $SEATS; do
+    # The seat's tmux window comes from its record: the runtime may rebuild seats in another session (after a reboot, 2026-09-25).
+    win=$(sed -n 's/^window=//p' $S/$s.meta 2>/dev/null)
     have=$(cat $W/$s.lines); now=$(wc -l < $S/$s.status | tr -d ' ')
     if [ "$now" -gt "$have" ]; then
       new=$(tail -n $((now-have)) $S/$s.status)
@@ -85,7 +87,7 @@ while :; do
     # stale, and only when its PANE has stopped changing for STALL_MIN - the status file's age alone false-fired
     # on a seat that just started a fresh turn after sitting idle for hours (Demand 17:23/17:58, 2026-09-22):
     # its status file was old, but the pane was actively working under a minute in.
-    pane_now=$(tmux capture-pane -p -t firstmate:fm-$s 2>/dev/null | tail -8)
+    pane_now=$(tmux capture-pane -p -t "$win" 2>/dev/null | tail -8)
     busy=$(printf '%s' "$pane_now" | grep -ci "esc to interrupt")
     if [ "$busy" -gt 0 ]; then
       hash_now=$(printf '%s' "$pane_now" | pane_hash)
@@ -106,13 +108,13 @@ while :; do
         fi
       fi
     fi
-    tmux list-windows -t firstmate -F '#{window_name}' 2>/dev/null | grep -qx "fm-$s" || fire "$s lead window is gone"
+    [ -n "$win" ] && tmux list-windows -t "${win%%:*}" -F "#{window_name}" 2>/dev/null | grep -qx "${win#*:}" || fire "$s lead window is gone"
     # Runtime defect found 2026-09-21: fm-send types its doorbell into a Claude lead's input box but the
     # Enter lands too early, so instructions sit unsent and unread. If the lead is idle with a doorbell
     # waiting and unread messages exist, press Enter for it.
     unread=$(ls $S/$s.inbox/*.msg 2>/dev/null | wc -l | tr -d ' ')
     if [ "$unread" -gt 0 ]; then
-      p2=$(tmux capture-pane -p -t firstmate:fm-$s 2>/dev/null | tail -12)
+      p2=$(tmux capture-pane -p -t "$win" 2>/dev/null | tail -12)
       oldest=$(ls -t $S/$s.inbox/*.msg 2>/dev/null | tail -1)
       uage=$(( ( $(date +%s) - $(stat -f %m "$oldest") ) / 60 ))
       if printf '%s' "$p2" | grep -q "esc to interrupt"; then
@@ -124,17 +126,17 @@ while :; do
           sleep 6
         fi
       fi
-      p2=$(tmux capture-pane -p -t firstmate:fm-$s 2>/dev/null | tail -12)
+      p2=$(tmux capture-pane -p -t "$win" 2>/dev/null | tail -12)
       if ! printf '%s' "$p2" | grep -q "esc to interrupt"; then
         # Idle with unread mail: submit our existing doorbell, or type it only into an empty composer.
         # Unrelated composer text stays protected even when fm-send's own line may never have landed.
         # ring_doorbell waits for the pane to show the pasted line before sending one Enter, then reports
         # failure if the composer remains populated after ~3s.
-        ring_doorbell "firstmate:fm-$s" "Firstmate doorbell: read $S/$s.inbox/*.msg in numeric order, act on each, then mv each handled file to $S/$s.inbox/handled/."
+        ring_doorbell "$win" "Firstmate doorbell: read $S/$s.inbox/*.msg in numeric order, act on each, then mv each handled file to $S/$s.inbox/handled/."
       fi
     fi
     # Known silent killers, caught by name instead of waiting 40 minutes: quota, sleep, provider errors.
-    pane=$(tmux capture-pane -p -t firstmate:fm-$s 2>/dev/null | tail -12)
+    pane=$(tmux capture-pane -p -t "$win" 2>/dev/null | tail -12)
     cause=$(printf '%s' "$pane" | grep -o -E "hit your usage limit|went to sleep mid-response|API Error[^.]*|Login expired|rate limit" | head -1)
     if [ -n "$cause" ] && [ "$cause" != "$(cat $W/$s.cause 2>/dev/null)" ]; then
       printf '%s' "$cause" > $W/$s.cause
