@@ -139,6 +139,8 @@ _fm_wake_tmux_composer_text() {  # <target>
     return "$rc"
   fi
   while IFS= read -r line; do
+    # Claude Code draws its empty prompt as the chevron plus U+00A0; [:space:] misses it in the C locale.
+    line=${line//$'\302\240'/ }
     line=${line#"${line%%[![:space:]]*}"}
     line=${line%"${line##*[![:space:]]}"}
     _fm_wake_tmux_composer_rule_line "$line" && continue
