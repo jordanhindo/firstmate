@@ -121,6 +121,23 @@ test_empty_claude_fixture_is_submit_safe() {
   pass "shared doorbell parser: the captured empty Claude separator composer is safe to submit"
 }
 
+test_nbsp_prompt_empty_composer_is_submit_safe() {
+  local dir out
+  dir=$(make_send_case nbsp-composer)
+  # Claude Code draws its empty prompt as the chevron plus U+00A0, not an ASCII space (seat panes, 2026-09-26).
+  sed "s/^❯ \$/❯$(printf '\302\240')/" "$FIXTURE" > "$dir/fixture.txt"
+  grep -q "$(printf '\302\240')" "$dir/fixture.txt" || fail "fixture did not get the non-breaking space"
+  : > "$dir/typed"
+  : > "$dir/tmux.log"
+  run_fixture_send "$dir" || fail "fm-send rejected an empty composer drawn with a non-breaking space"
+  out=$(cat "$dir/tmux.log")
+  [ "$(grep -c '^enter$' "$dir/tmux.log" || true)" -eq 1 ] \
+    || fail "empty non-breaking-space composer should receive exactly one Enter: $out"
+  assert_not_contains "$(cat "$dir/send.err")" "doorbell skipped" \
+    "a non-breaking space after the prompt must not read as foreign text"
+  pass "shared doorbell parser: an empty prompt drawn with a non-breaking space is safe to submit"
+}
+
 test_horizontal_rule_composer_text_stays_protected() {
   local dir
   dir=$(make_send_case human-text)
@@ -322,6 +339,7 @@ SH
 }
 
 test_empty_claude_fixture_is_submit_safe
+test_nbsp_prompt_empty_composer_is_submit_safe
 test_horizontal_rule_composer_text_stays_protected
 test_mixed_harness_stale_region_never_submits_live_human_draft
 test_attach_beacon_refresh_makes_guard_healthy
