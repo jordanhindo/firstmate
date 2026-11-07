@@ -793,16 +793,6 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
-# Optional case names keep local RED/GREEN iterations focused; no arguments run the file.
-if [ "$#" -gt 0 ]; then
-  for selected_case in "$@"; do
-    case "$selected_case" in test_*) ;; *) fail "unknown test case: $selected_case" ;; esac
-    declare -F "$selected_case" >/dev/null || fail "unknown test case: $selected_case"
-    "$selected_case" || exit $?
-  done
-  printf '%s\n' '# selected test cases passed'
-  exit 0
-fi
 
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers

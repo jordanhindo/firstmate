@@ -1149,16 +1149,6 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
-# Optional case names keep local RED/GREEN iterations focused; no arguments run the file.
-if [ "$#" -gt 0 ]; then
-  for selected_case in "$@"; do
-    case "$selected_case" in test_*) ;; *) fail "unknown test case: $selected_case" ;; esac
-    declare -F "$selected_case" >/dev/null || fail "unknown test case: $selected_case"
-    "$selected_case" || exit $?
-  done
-  printf '%s\n' '# selected test cases passed'
-  exit 0
-fi
 
 test_bootstrap_reporting
 test_no_mistakes_min_version
